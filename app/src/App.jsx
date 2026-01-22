@@ -50,44 +50,54 @@ export default function App() {
       alert("No wallet found. Install MetaMask or Rabby.");
       return;
     }
+
     const client = createWalletClient({
       chain: genlayerAsimov,
       transport: custom(window.ethereum),
     });
+
     const [address] = await client.requestAddresses();
     setWallet(address);
     setProfileOpen(true);
   }
 
-  async function saveDisplayName() {
-    if (!wallet) return;
+  function saveDisplayName() {
+    if (!wallet) {
+      alert("Connect wallet first.");
+      return;
+    }
+
     const name = displayName.trim();
     if (!/^[a-zA-Z0-9_]{1,20}$/.test(name)) {
       alert("Display name must be 1-20 chars: letters, numbers, underscore.");
       return;
     }
-    const timestamp = Math.floor(Date.now() / 1000);
-    const message = `Set display name to ${name} at ${timestamp}`;
 
-    const client = createWalletClient({
-      chain: genlayerAsimov,
-      transport: custom(window.ethereum),
-    });
+    (async () => {
+      const timestamp = Math.floor(Date.now() / 1000);
+      const message = `Set display name to ${name} at ${timestamp}`;
 
-    const signature = await client.signMessage({ message });
+      const client = createWalletClient({
+        chain: genlayerAsimov,
+        transport: custom(window.ethereum),
+      });
 
-    const res = await fetch(`${serverUrl}/api/profile/display-name`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wallet, displayName: name, timestamp, signature }),
-    });
-    const json = await res.json();
-    if (!json.ok) {
-      alert(`Failed: ${json.error?.message || json.error || "unknown"}`);
-      return;
-    }
+      const signature = await client.signMessage({ account: wallet, message });
 
-    setProfileOpen(false);
+      const res = await fetch(`${serverUrl}/api/profile/display-name`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wallet, displayName: name, timestamp, signature }),
+      });
+
+      const json = await res.json();
+      if (!json.ok) {
+        alert(`Failed: ${json.error?.message || json.error || "unknown"}`);
+        return;
+      }
+
+      setProfileOpen(false);
+    })().catch((e) => alert(e?.message || String(e)));
   }
 
   function joinRoom() {
@@ -137,6 +147,9 @@ export default function App() {
   const currentRound = match ? match.rounds[match.currentRoundIndex] : null;
   const isHost = wallet && roomState?.host && wallet.toLowerCase() === roomState.host.toLowerCase();
 
+
+  const nameOk = /^[a-zA-Z0-9_]{1,20}$/.test(displayName.trim());
+  const canSaveName = !!wallet && nameOk;
   const tabs = [
     { id: "lobby", label: "Lobby" },
     { id: "match", label: "Match" },
@@ -478,7 +491,9 @@ export default function App() {
               onChange={setDisplayName}
               onClose={() => setProfileOpen(false)}
               onSave={saveDisplayName}
-            />
+            
+            canSave={canSaveName}
+          />
           )}
         </AnimatePresence>
       </div>
@@ -685,7 +700,7 @@ function Votes({ match }) {
   );
 }
 
-function ProfileModal({ value, onChange, onClose, onSave }) {
+function ProfileModal({ value, onChange, onClose, onSave, canSave }) {
   return (
     <motion.div
       className="fixed inset-0 z-[250] flex items-center justify-center bg-black/70 px-4"
@@ -722,7 +737,9 @@ function ProfileModal({ value, onChange, onClose, onSave }) {
 
         <div className="mt-4 flex justify-end gap-2">
           <Button onClick={onClose} variant="ghost">Cancel</Button>
-          <Button onClick={onSave} variant="primary">Save</Button>
+          <Button onClick={onSave} variant={canSave ? "primary" : "disabled"} disabled={!canSave}>
+            Save
+          </Button>
         </div>
       </motion.div>
     </motion.div>

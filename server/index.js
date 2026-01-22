@@ -6,12 +6,15 @@ import { Server } from 'socket.io';
 import { z } from 'zod';
 import { recoverMessageAddress } from 'viem';
 
+import { MatchEngine } from './matchEngine.js';
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
+
+const engine = new MatchEngine(io);
 
 const PORT = Number(process.env.PORT || 3001);
 
@@ -125,6 +128,7 @@ function startMatch(roomId) {
   emitRoomState(roomId);
 }
 
+/* OLD_SCHEDULER_DISABLED
 function schedulePhaseTick(roomId) {
   const tick = () => {
     const match = matches.get(roomId);
@@ -231,62 +235,62 @@ function schedulePhaseTick(roomId) {
   setTimeout(tick, 250);
 }
 
+
+END_OLD_SCHEDULER_DISABLED */
+
 io.on('connection', (socket) => {
-  socket.on('room:join', ({ roomId, wallet }) => {
-    if (!roomId || !wallet) return;
-    const room = getOrCreateRoom(roomId, wallet);
-    const cached = users.get(wallet.toLowerCase());
-    const displayName = cached?.displayName || `player_${wallet.slice(2, 6)}`;
 
-    room.members.set(wallet.toLowerCase(), { displayName });
-    socket.join(roomId);
-    emitRoomState(roomId);
+  socket.on('room:join', (payload) => {
+    try {
+      const { roomId, wallet } = payload || {};
+      const w = (wallet || '').toLowerCase();
+      const u = users.get(w);
+      const displayName = u?.displayName;
+      engine.joinRoom({ socket, roomId, wallet, displayName });
+    } catch (e) {
+      socket.emit('error', { message: e?.message || String(e) });
+    }
+  });
+socket.on('room:leave', (payload) => {
+    try {
+      const { roomId, wallet } = payload || {};
+      engine.leaveRoom({ socket, roomId, wallet });
+    } catch (e) {
+      socket.emit('error', { message: e?.message || String(e) });
+    }
   });
 
-  socket.on('room:leave', ({ roomId, wallet }) => {
-    const room = rooms.get(roomId);
-    if (room) room.members.delete(wallet.toLowerCase());
-    socket.leave(roomId);
-    emitRoomState(roomId);
+  socket.on('match:start', (payload) => {
+    try {
+      const { roomId, wallet } = payload || {};
+      engine.startMatch({ roomId, wallet, rounds: 3 });
+    } catch (e) {
+      socket.emit('error', { message: e?.message || String(e) });
+    }
   });
 
-  socket.on('match:start', ({ roomId, wallet }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    if (room.host.toLowerCase() !== wallet.toLowerCase()) return;
-    startMatch(roomId);
+  socket.on('round:submit', (payload) => {
+    try {
+      engine.submit(payload || {});
+    } catch (e) {
+      socket.emit('error', { message: e?.message || String(e) });
+    }
   });
 
-  socket.on('round:submit', ({ roomId, wallet, roundId, text }) => {
-    const match = matches.get(roomId);
-    if (!match || match.phase !== 'submit') return;
-    match.submissions[roundId] = match.submissions[roundId] || {};
-    match.submissions[roundId][wallet.toLowerCase()] = String(text || '').slice(0, 240);
-    emitRoomState(roomId);
+  socket.on('challenge:create', (payload) => {
+    try {
+      engine.createChallenge(payload || {});
+    } catch (e) {
+      socket.emit('error', { message: e?.message || String(e) });
+    }
   });
 
-  socket.on('challenge:create', ({ roomId, wallet, roundId, reasonCode }) => {
-    const match = matches.get(roomId);
-    if (!match || match.phase !== 'challenge_window') return;
-    if (match.challenge) return;
-
-    match.challenge = {
-      roundId,
-      reasonCode: reasonCode || 'too_harsh',
-      createdAt: nowMs(),
-      endsAt: nowMs() + 120_000,
-      votes: {}
-    };
-    match.phase = 'challenge_vote';
-    match.phaseEndsAt = match.challenge.endsAt;
-    emitRoomState(roomId);
-  });
-
-  socket.on('challenge:vote', ({ roomId, wallet, voteYes }) => {
-    const match = matches.get(roomId);
-    if (!match || match.phase !== 'challenge_vote' || !match.challenge) return;
-    match.challenge.votes[wallet.toLowerCase()] = !!voteYes;
-    emitRoomState(roomId);
+  socket.on('challenge:vote', (payload) => {
+    try {
+      engine.voteChallenge(payload || {});
+    } catch (e) {
+      socket.emit('error', { message: e?.message || String(e) });
+    }
   });
 });
 
