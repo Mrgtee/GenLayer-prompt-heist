@@ -7,9 +7,18 @@ import { z } from 'zod';
 import { recoverMessageAddress } from 'viem';
 
 import { MatchEngine } from './matchEngine.js';
+import { upsertPlayer, topPlayers } from './db.js';
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+
+app.get('/api/leaderboard/global', (req, res) => {
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 25)));
+  const players = topPlayers(limit);
+  
+    res.json({ ok: true, players });
+});
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
@@ -59,8 +68,15 @@ app.post('/api/profile/display-name', async (req, res) => {
     }
 
     users.set(wallet.toLowerCase(), { displayName, updatedAt: Date.now() });
+    // Persist name to global leaderboard DB
+    try {
+      upsertPlayer({ wallet, displayName });
+    } catch (e) {
+      console.error("upsertPlayer failed:", e);
+    }
+
     return res.json({ ok: true });
-  } catch (e) {
+} catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   }
 });
