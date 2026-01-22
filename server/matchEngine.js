@@ -308,6 +308,34 @@ export class MatchEngine {
     room.match.phase = "completed";
     room.match.phaseEndsAtMs = null;
 
+    // Build final (match-wide) leaderboard: sum of round scores = XP
+    const members = room?.members || [];
+    const byLower = new Map(members.map((m) => [m.wallet.toLowerCase(), m]));
+
+    const totals = new Map(); // walletLower -> { totalXp, roundsPlayed }
+    for (const r of room.match.rounds || []) {
+      for (const [walletLower, sc] of Object.entries(r.scores || {})) {
+        const cur = totals.get(walletLower) || { totalXp: 0, roundsPlayed: 0 };
+        cur.totalXp += Number(sc?.score || 0);
+        cur.roundsPlayed += 1;
+        totals.set(walletLower, cur);
+      }
+    }
+
+    const finalLeaderboard = Array.from(totals.entries()).map(([walletLower, t]) => {
+      const m = byLower.get(walletLower);
+      return {
+        wallet: m?.wallet || walletLower,
+        displayName: m?.displayName || `player_${walletLower.slice(2, 6)}`,
+        totalXp: t.totalXp,
+        roundsPlayed: t.roundsPlayed,
+      };
+    });
+
+    finalLeaderboard.sort((a, b) => b.totalXp - a.totalXp);
+
+    room.match.finalLeaderboard = finalLeaderboard;
+
     // Later: final XP aggregation across rounds.
   }
 

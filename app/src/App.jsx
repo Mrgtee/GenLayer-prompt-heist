@@ -330,10 +330,11 @@ export default function App() {
                     </div>
                   ) : (
                     <>
-                      <Leaderboard match={match} roundId={currentRound.roundId} />
-                      {match.phase === "challenge_vote" && <Votes match={match} />}
-                    </>
-                  )}
+                        <Leaderboard match={match} roundId={currentRound.roundId} />
+                        {match.phase === "challenge_vote" && <Votes match={match} />}
+                        {match.phase === "completed" && <FinalLeaderboard match={match} />}
+                      </>
+)}
                 </div>
               )}
 
@@ -699,6 +700,64 @@ function Votes({ match }) {
     </div>
   );
 }
+
+function FinalLeaderboard({ match }) {
+  const list = match?.finalLeaderboard || [];
+  const rounds = match?.rounds?.length || 0;
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <div className="text-xs text-white/55 font-mono">CASE CLOSED</div>
+          <div className="mt-1 text-sm font-semibold">Final Leaderboard (Total XP)</div>
+        </div>
+        <Badge label={`${rounds} rounds`} />
+      </div>
+
+      {list.length === 0 ? (
+        <div className="mt-2 text-sm text-white/70">
+          Final leaderboard not available yet.
+        </div>
+      ) : (
+        <ol className="mt-3 space-y-2">
+          {list.map((p, idx) => (
+            <li
+              key={p.wallet}
+              className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/30 p-3"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-white/60 font-mono">#{idx + 1}</span>
+                  <span className="truncate text-sm font-semibold">
+                    {p.displayName || shortAddr(p.wallet)}
+                  </span>
+                  <span className="text-xs font-mono text-white/55">
+                    ({shortAddr(p.wallet)})
+                  </span>
+                </div>
+                <div className="mt-1 text-xs text-white/70">
+                  <span className="text-white/50 font-mono">Rounds:</span> {p.roundsPlayed ?? "-"}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <ScoreBar
+                  score={Math.min(
+                    100,
+                    Math.round(((p.totalXp || 0) / Math.max(1, rounds * 100)) * 100)
+                  )}
+                />
+                <Badge label={`${p.totalXp || 0} XP`} tone="good" />
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 
 function ProfileModal({ value, onChange, onClose, onSave, canSave }) {
   return (
