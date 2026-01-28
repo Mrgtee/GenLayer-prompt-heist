@@ -7,12 +7,16 @@ import { z } from 'zod';
 import { recoverMessageAddress } from 'viem';
 import dotenv from "dotenv";
 dotenv.config({ path: new URL("./.env", import.meta.url) });
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 
 import { topPlayers } from './db.js';
 import { upsertPlayer, getGlobalLeaderboard } from './leaderboardStore.js';
 import { MatchEngine } from './matchEngine.js';
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: CORS_ORIGIN,
+  credentials: true,
+}));
 app.use(express.json());
 
 /* PATCH: GLOBAL_LEADERBOARD_FROM_DB */
@@ -43,7 +47,12 @@ app.get('/api/leaderboard/global', (req, res) => {
 });
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, {
+  cors: {
+    origin: CORS_ORIGIN,
+    credentials: true,
+  },
+});
 
 const engine = new MatchEngine(io);
 
