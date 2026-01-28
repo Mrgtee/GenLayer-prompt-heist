@@ -5,3 +5,30 @@ dist
 .cache
 .vite
 .DS_Store
+
+# Env files
+**/.env
+**/.env.*
+
+# Node
+**/node_modules/
+
+# Build outputs
+**/dist/
+**/.vite/
+
+# SQLite / local DB
+**/*.sqlite
+**/*.sqlite-*
+**/*.db
+**/*.db-*
+
+# Backups / patch scripts / temp
+**/*.bak*
+**/*_patch*.sh
+**/_*.sh
+**/*.log
+
+# OS
+.DS_Store
+
