@@ -1,4 +1,10 @@
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
+import { addXp } from "./db.js";
+import { judgeGuess } from "./genlayerJudge.mjs";
+
+/* ---------------- Helpers ---------------- */
 
 function nowMs() {
   return Date.now();
@@ -12,27 +18,102 @@ function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
 
-// MVP case library: replace later with your 100-image rotation.
-// For now: use URLs your frontend can load (or your own /assets).
-const CASES = [
-  {
-    id: "case_001",
-    imageUrl: "https://picsum.photos/seed/genlayer1/1200/700",
-    secretPrompt: "a cinematic portrait of a robot detective in a rainy neon city, moody lighting",
-  },
-  {
-    id: "case_002",
-    imageUrl: "https://picsum.photos/seed/genlayer2/1200/700",
-    secretPrompt: "a whimsical watercolor of a floating island with tiny houses and clouds, warm palette",
-  },
-  {
-    id: "case_003",
-    imageUrl: "https://picsum.photos/seed/genlayer3/1200/700",
-    secretPrompt: "pixel art cat astronaut standing on a moon base, playful vibe, retro colors",
-  },
-];
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
-// Phase lengths (tune later; total match stays 5–15 min depending rounds)
+/* ---------------- Cases (100 images) ---------------- */
+
+// Loads ./cases.json from the server folder
+function loadCasesFromDisk() {
+  const p = path.join(process.cwd(), "cases.json");
+  const raw = fs.readFileSync(p, "utf8");
+  const arr = JSON.parse(raw);
+
+  if (!Array.isArray(arr) || arr.length < 5) {
+    throw new Error("cases.json must be an array with at least 5 items");
+  }
+  for (const c of arr) {
+    if (!c?.id || !c?.imageUrl || !c?.secretPrompt) {
+      throw new Error("Each case must have { id, imageUrl, secretPrompt }");
+    }
+  }
+  return arr;
+}
+
+// Phase lengths (tune later)
+
+/* ---------------- GenLayer Judge Resilience ---------------- */
+
+// Small in-memory circuit breaker (per server process)
+const __JUDGE_STATE__ = {
+  failCount: 0,
+  lastFailAt: 0,
+  openUntil: 0,
+};
+
+function __sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function __withTimeout(promise, ms) {
+  let t;
+  const timeout = new Promise((_, rej) => {
+    t = setTimeout(() => rej(new Error("Judge timeout")), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function __openCircuit(ms) {
+  __JUDGE_STATE__.openUntil = Date.now() + ms;
+}
+
+function __circuitOpen() {
+  return Date.now() < (__JUDGE_STATE__.openUntil || 0);
+}
+
+async function __judgeWithRetry({ guess, secret, tries = 3 }) {
+  // Circuit open → skip remote judge immediately
+  if (__circuitOpen()) throw new Error("Judge circuit open");
+
+  let lastErr = null;
+  const backoffs = [0, 500, 1500]; // ms
+
+  for (let i = 0; i < tries; i++) {
+    try {
+      if (backoffs[i]) await __sleep(backoffs[i]);
+
+      // Hard timeout per attempt (tuneable)
+      const res = await __withTimeout(judgeGuess({ guess, secret }), 25_000);
+
+      // Success → reset state
+      __JUDGE_STATE__.failCount = 0;
+      __JUDGE_STATE__.lastFailAt = 0;
+      return res;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  // Failure policy: increment fail count; if repeated, open circuit briefly
+  __JUDGE_STATE__.failCount = (__JUDGE_STATE__.failCount || 0) + 1;
+  __JUDGE_STATE__.lastFailAt = Date.now();
+
+  // After 2 consecutive failures, pause judge attempts for 20s
+  if (__JUDGE_STATE__.failCount >= 2) __openCircuit(30_000);
+
+  throw lastErr || new Error("Judge failed");
+}
+
 const PHASE_MS = {
   reveal: 12_000,
   submit: 45_000,
@@ -58,9 +139,7 @@ export class MatchEngine {
         host: null,
         members: [], // { wallet, displayName }
         match: null,
-        timers: {
-          phaseTimeout: null,
-        },
+        timers: { phaseTimeout: null },
       };
       this.rooms.set(rid, room);
     }
@@ -68,10 +147,10 @@ export class MatchEngine {
   }
 
   getRoom(roomId) {
-    return this.rooms.get(roomId) || null;
+    const rid = (roomId || "").trim() || "genlayer";
+    return this.rooms.get(rid) || null;
   }
 
-  // Emits canonical room state to everyone in that socket.io room
   emitRoomState(room) {
     this.io.to(room.roomId).emit("room:state", this.publicRoomState(room));
   }
@@ -91,24 +170,20 @@ export class MatchEngine {
     const room = this.ensureRoom(roomId);
     const w = (wallet || "").toLowerCase();
 
-    if (!w.startsWith("0x") || w.length < 10) {
-      throw new Error("Invalid wallet");
-    }
+    if (!w.startsWith("0x") || w.length < 10) throw new Error("Invalid wallet");
 
-    // Join socket.io room
     socket.join(room.roomId);
 
     const existing = room.members.find((m) => m.wallet.toLowerCase() === w);
     if (!existing) {
       room.members.push({
         wallet,
-        displayName: displayName || `player_${wallet.slice(2, 6)}`,
+        displayName: (displayName || "").trim() || `player_${wallet.slice(2, 6)}`,
       });
-    } else if (displayName && displayName !== existing.displayName) {
-      existing.displayName = displayName;
+    } else if (displayName && displayName.trim() && displayName !== existing.displayName) {
+      existing.displayName = displayName.trim();
     }
 
-    // Assign host if empty
     if (!room.host) room.host = wallet;
 
     this.emitRoomState(room);
@@ -124,12 +199,10 @@ export class MatchEngine {
 
     room.members = room.members.filter((m) => m.wallet.toLowerCase() !== w);
 
-    // Reassign host if needed
     if (room.host && room.host.toLowerCase() === w) {
       room.host = room.members[0]?.wallet || null;
     }
 
-    // If room empty: stop match and delete
     if (room.members.length === 0) {
       this.stopMatch(room);
       this.rooms.delete(room.roomId);
@@ -145,31 +218,33 @@ export class MatchEngine {
     const room = this.getRoom(roomId);
     if (!room) throw new Error("Room not found");
 
-    const isHost = room.host && room.host.toLowerCase() === wallet.toLowerCase();
+    const isHost = room.host && room.host.toLowerCase() === (wallet || "").toLowerCase();
     if (!isHost) throw new Error("Only host can start match");
 
     if (room.match && room.match.phase !== "completed") {
       throw new Error("Match already running");
     }
 
-    // Build rounds (MVP random selection)
-    const chosen = this.pickCases(rounds);
+    const CASES = loadCasesFromDisk();
+    const chosen = this.pickCases(CASES, rounds);
 
     room.match = {
       matchId: uid("match_"),
       phase: "reveal",
+      isJudging: false,
       startedAtMs: nowMs(),
       currentRoundIndex: 0,
       rounds: chosen.map((c) => ({
         roundId: uid("round_"),
         caseId: c.id,
         imageUrl: c.imageUrl,
-        secretPrompt: c.secretPrompt, // keep server-side (MVP). Later: contract storage.
-        submissions: {}, // wallet -> { text, submittedAtMs }
-        scores: {}, // wallet -> { score, reasoning }
+        secretPrompt: c.secretPrompt, // server-side MVP
+        submissions: {}, // walletLower -> { text, submittedAtMs }
+        scores: {}, // walletLower -> { score, reasoning }
       })),
       leaderboard: {}, // roundId -> [{ wallet, score, reasoning }]
-      challenge: null, // { roundId, createdBy, reasonCode, votes: {wallet: bool}, endsAtMs }
+      challenge: null,
+      finalLeaderboard: [], // [{ wallet, displayName, totalXp }]
       phaseEndsAtMs: nowMs() + PHASE_MS.reveal,
     };
 
@@ -195,19 +270,15 @@ export class MatchEngine {
   scheduleNextPhase(room) {
     this.clearTimers(room);
     const match = room.match;
-    if (!match) return;
+    if (!match?.phaseEndsAtMs) return;
 
-    const endsAt = match.phaseEndsAtMs;
-    if (!endsAt) return;
-
-    const delay = Math.max(0, endsAt - nowMs());
+    const delay = Math.max(0, match.phaseEndsAtMs - nowMs());
     room.timers.phaseTimeout = setTimeout(() => {
       try {
         this.advancePhase(room.roomId);
       } catch (e) {
-        // fail safe: mark completed rather than crash server
         console.error("advancePhase error:", e);
-        this.stopMatch(room);
+        this.finishMatch(room);
         this.emitRoomState(room);
       }
     }, delay);
@@ -221,17 +292,12 @@ export class MatchEngine {
     const phase = match.phase;
     const round = match.rounds[match.currentRoundIndex];
 
-    if (!round) {
-      this.finishMatch(room);
-      return;
-    }
+    if (!round) return this.finishMatch(room);
 
-    // If a challenge vote window is open, resolve it at end.
     if (phase === "challenge_vote") {
       this.resolveChallenge(room);
     }
 
-    // Phase transitions
     if (phase === "reveal") {
       match.phase = "submit";
       match.phaseEndsAtMs = nowMs() + PHASE_MS.submit;
@@ -240,45 +306,57 @@ export class MatchEngine {
     }
 
     if (phase === "submit") {
-      match.phase = "verdict";
+  // Enter verdict, but don't start the verdict timer yet
+  match.phase = "verdict";
+  match.isJudging = true;
+  match.phaseEndsAtMs = null;
+
+  // Let UI switch to verdict immediately ("Judging...")
+  this.emitRoomState(room);
+
+  this.scoreRound(room, round)
+    .then(() => {
+      match.isJudging = false;
+
+      // Start verdict countdown ONLY after scoring is ready
       match.phaseEndsAtMs = nowMs() + PHASE_MS.verdict;
 
-      // Score submissions (MVP server scoring). Swap later with GenLayer IC call.
-      this.scoreRound(room, round);
+      this.emitRoomState(room);
+      this.scheduleNextPhase(room);
+    })
+    .catch((e) => {
+      console.error("scoreRound failed:", e);
+
+      match.isJudging = false;
+      match.phaseEndsAtMs = nowMs() + PHASE_MS.verdict;
 
       this.emitRoomState(room);
-      return this.scheduleNextPhase(room);
-    }
+      this.scheduleNextPhase(room);
+    });
+
+  return;
+}
 
     if (phase === "verdict") {
       match.phase = "challenge_window";
       match.phaseEndsAtMs = nowMs() + PHASE_MS.challenge_window;
-      match.challenge = null; // reset per round
+      match.challenge = null;
       this.emitRoomState(room);
       return this.scheduleNextPhase(room);
     }
 
     if (phase === "challenge_window") {
-      // If no challenge, move on to next round
-      if (!match.challenge) {
-        return this.nextRoundOrFinish(room);
-      }
-
-      // If a challenge exists but vote never started (shouldn't happen), start vote anyway
+      if (!match.challenge) return this.nextRoundOrFinish(room);
       match.phase = "challenge_vote";
       match.phaseEndsAtMs = nowMs() + PHASE_MS.challenge_vote;
       if (!match.challenge.endsAtMs) match.challenge.endsAtMs = match.phaseEndsAtMs;
-
       this.emitRoomState(room);
       return this.scheduleNextPhase(room);
     }
 
     if (phase === "challenge_vote") {
-      // After resolveChallenge in beginning of this function, move on
       return this.nextRoundOrFinish(room);
     }
-
-    if (phase === "completed") return;
   }
 
   nextRoundOrFinish(room) {
@@ -287,9 +365,7 @@ export class MatchEngine {
 
     const nextIndex = match.currentRoundIndex + 1;
     if (nextIndex >= match.rounds.length) {
-      this.finishMatch(room);
-      this.emitRoomState(room);
-      return;
+      return this.finishMatch(room);
     }
 
     match.currentRoundIndex = nextIndex;
@@ -308,35 +384,45 @@ export class MatchEngine {
     room.match.phase = "completed";
     room.match.phaseEndsAtMs = null;
 
-    // Build final (match-wide) leaderboard: sum of round scores = XP
-    const members = room?.members || [];
-    const byLower = new Map(members.map((m) => [m.wallet.toLowerCase(), m]));
+    // Build per-match final leaderboard and persist global XP
+    this.buildFinalLeaderboardAndPersist(room);
 
-    const totals = new Map(); // walletLower -> { totalXp, roundsPlayed }
-    for (const r of room.match.rounds || []) {
-      for (const [walletLower, sc] of Object.entries(r.scores || {})) {
-        const cur = totals.get(walletLower) || { totalXp: 0, roundsPlayed: 0 };
-        cur.totalXp += Number(sc?.score || 0);
-        cur.roundsPlayed += 1;
-        totals.set(walletLower, cur);
+    this.emitRoomState(room);
+  }
+
+  /* ---------------- Final leaderboard + persistence ---------------- */
+
+  buildFinalLeaderboardAndPersist(room) {
+    const match = room.match;
+    if (!match) return;
+
+    // totalXp = sum of per-round scores
+    const totals = new Map(); // walletLower -> totalXp
+
+    for (const r of match.rounds || []) {
+      for (const [walletLower, s] of Object.entries(r.scores || {})) {
+        totals.set(walletLower, (totals.get(walletLower) || 0) + (Number(s.score) || 0));
       }
     }
 
-    const finalLeaderboard = Array.from(totals.entries()).map(([walletLower, t]) => {
-      const m = byLower.get(walletLower);
-      return {
-        wallet: m?.wallet || walletLower,
-        displayName: m?.displayName || `player_${walletLower.slice(2, 6)}`,
-        totalXp: t.totalXp,
-        roundsPlayed: t.roundsPlayed,
-      };
-    });
+    const finalLeaderboard = [];
+    for (const [walletLower, totalXp] of totals.entries()) {
+      const member = room.members.find((m) => m.wallet.toLowerCase() === walletLower);
+      const displayName = member?.displayName || `player_${walletLower.slice(2, 6)}`;
+      const wallet = member?.wallet || walletLower;
+
+      finalLeaderboard.push({ wallet, displayName, totalXp });
+
+      // persist globally
+      try {
+        addXp({ wallet, deltaXp: totalXp, displayName });
+      } catch (e) {
+        console.error("addXp failed:", e);
+      }
+    }
 
     finalLeaderboard.sort((a, b) => b.totalXp - a.totalXp);
-
-    room.match.finalLeaderboard = finalLeaderboard;
-
-    // Later: final XP aggregation across rounds.
+    match.finalLeaderboard = finalLeaderboard;
   }
 
   /* ---------------- Submissions ---------------- */
@@ -351,12 +437,11 @@ export class MatchEngine {
     const round = match.rounds.find((r) => r.roundId === roundId);
     if (!round) return;
 
-    const w = wallet.toLowerCase();
+    const w = (wallet || "").toLowerCase();
     const t = (text || "").trim();
     if (!t) return;
 
     round.submissions[w] = { text: t.slice(0, 240), submittedAtMs: nowMs() };
-
     this.emitRoomState(room);
   }
 
@@ -368,18 +453,16 @@ export class MatchEngine {
 
     const match = room.match;
     if (match.phase !== "challenge_window") return;
-
-    if (match.challenge) return; // only one challenge per round (MVP)
+    if (match.challenge) return;
 
     match.challenge = {
       roundId,
       createdBy: wallet,
       reasonCode,
-      votes: {}, // wallet -> boolean
+      votes: {},
       endsAtMs: nowMs() + PHASE_MS.challenge_vote,
     };
 
-    // Immediately enter vote phase
     match.phase = "challenge_vote";
     match.phaseEndsAtMs = match.challenge.endsAtMs;
 
@@ -397,7 +480,7 @@ export class MatchEngine {
     const ch = match.challenge;
     if (!ch) return;
 
-    const w = wallet.toLowerCase();
+    const w = (wallet || "").toLowerCase();
     ch.votes[w] = !!voteYes;
 
     this.emitRoomState(room);
@@ -415,20 +498,16 @@ export class MatchEngine {
     const yes = votes.filter(Boolean).length;
     const no = votes.length - yes;
 
-    // Simple majority rule (MVP)
     const overturn = yes > no && votes.length > 0;
 
     if (overturn) {
-      // MVP: bump scores modestly (later: contract re-judge / democratic adjustment)
       for (const w of Object.keys(round.scores)) {
         round.scores[w].score = clamp(round.scores[w].score + 8, 0, 100);
         round.scores[w].reasoning = "Democracy override: crowd agreed the judge was too harsh.";
       }
-      // Rebuild leaderboard after modification
       this.buildLeaderboard(match, round);
     }
 
-    // challenge resolved
     match.challenge = {
       ...ch,
       resolved: true,
@@ -438,30 +517,51 @@ export class MatchEngine {
     };
   }
 
-  /* ---------------- Scoring (MVP server scoring) ---------------- */
+  /* ---------------- Scoring ---------------- */
 
-  scoreRound(room, round) {
-    // If nobody submitted, still create empty leaderboard
-    const entries = Object.entries(round.submissions || {});
-    const scores = {};
+async scoreRound(room, round) {
+  const entries = Object.entries(round.submissions || {});
 
-    for (const [walletLower, sub] of entries) {
-      const guess = sub.text || "";
-      const secret = round.secretPrompt || "";
+  const scores = {};
 
-      const score = this.simpleSemanticScore(guess, secret);
-      const reasoning = this.oneSentenceReasoning(score, guess, secret);
+  for (const [walletLower, sub] of entries) {
+    const guess = sub.text || "";
+    const secret = round.secretPrompt || "";
 
-      scores[walletLower] = { score, reasoning };
+    let score = 0;
+    let reasoning = "";
+
+    try {
+      // GenLayer Studio Judge (retry + timeout + circuit breaker)
+      const res = await __judgeWithRetry({ guess, secret, tries: 3 });
+      score = Number(res.score) || 0;
+      reasoning = res.reasoning || "";
+
+      // If judge claims success but returns an empty verdict, force fallback
+    if ((guess || "").trim() && (secret || "").trim() && score === 0 && !reasoning) {
+    throw new Error("Judge returned empty verdict");
+}
+
+    } catch (e) {
+      // Fallback (never breaks gameplay)
+      score = this.simpleSemanticScore(guess, secret);
+      reasoning = this.oneSentenceReasoning(score);
+
+      // Log only a compact message (avoid spam)
+      const msg = (e?.message || String(e)).slice(0, 180);
+      console.warn("GenLayer judge failed (fallback used):", msg);
     }
 
-    round.scores = scores;
-    this.buildLeaderboard(room.match, round);
+    scores[walletLower] = { score, reasoning };
   }
+
+  round.scores = scores;
+  this.buildLeaderboard(room.match, round);
+}
 
   buildLeaderboard(match, round) {
     const list = Object.entries(round.scores || {}).map(([walletLower, s]) => ({
-      wallet: this.walletFromLower(match, walletLower),
+      wallet: walletLower,
       score: s.score,
       reasoning: s.reasoning,
     }));
@@ -471,14 +571,7 @@ export class MatchEngine {
     match.leaderboard[round.roundId] = list;
   }
 
-  walletFromLower(match, walletLower) {
-    // preserve original casing if possible (members store actual wallet)
-    return walletLower.startsWith("0x") ? walletLower : walletLower;
-  }
-
   simpleSemanticScore(guess, secret) {
-    // MVP heuristic: token overlap + length sanity.
-    // Swap later with IC multimodal/semantic judge call.
     const g = (guess || "").toLowerCase();
     const s = (secret || "").toLowerCase();
 
@@ -491,14 +584,13 @@ export class MatchEngine {
     const union = new Set([...gt, ...st]).size || 1;
     const jaccard = inter / union;
 
-    // favor descriptive guesses
     const lenBonus = clamp(g.length / 180, 0, 1) * 0.12;
-
     const raw = (jaccard * 0.88 + lenBonus) * 100;
+
     return Math.round(clamp(raw, 0, 100));
   }
 
-  oneSentenceReasoning(score, guess, secret) {
+  oneSentenceReasoning(score) {
     if (score >= 85) return "Strong match on subject and style—your prompt captures the intent closely.";
     if (score >= 70) return "Good alignment overall, but a few key details or stylistic cues are missing.";
     if (score >= 55) return "Some correct elements, though the core style/scene differs from the target prompt.";
@@ -506,11 +598,11 @@ export class MatchEngine {
     return "Low similarity—your guess misses the prompt’s core subject, setting, and style.";
   }
 
-  pickCases(n) {
-    const count = clamp(Number(n || 3), 1, 5);
-    const shuffled = [...CASES].sort(() => Math.random() - 0.5);
+  pickCases(CASES, n) {
+    const count = clamp(Number(n || 3), 1, 10);
+    const shuffled = shuffle(CASES);
     const selected = shuffled.slice(0, count);
-    // If not enough, wrap (MVP)
+    // wrap if not enough
     while (selected.length < count) selected.push(...shuffled);
     return selected.slice(0, count);
   }

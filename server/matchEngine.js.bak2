@@ -1,0 +1,604 @@
+import crypto from "crypto";
+import { addXp } from "./db.js";
+function nowMs() {
+  return Date.now();
+}
+
+function uid(prefix = "") {
+  return prefix + crypto.randomBytes(8).toString("hex");
+}
+
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
+}
+
+// MVP case library: replace later with your 100-image rotation.
+// For now: use URLs your frontend can load (or your own /assets).
+const CASES = [
+  {
+    id: "case_001",
+    imageUrl: "https://picsum.photos/seed/genlayer1/1200/700",
+    secretPrompt: "a cinematic portrait of a robot detective in a rainy neon city, moody lighting",
+  },
+  {
+    id: "case_002",
+    imageUrl: "https://picsum.photos/seed/genlayer2/1200/700",
+    secretPrompt: "a whimsical watercolor of a floating island with tiny houses and clouds, warm palette",
+  },
+  {
+    id: "case_003",
+    imageUrl: "https://picsum.photos/seed/genlayer3/1200/700",
+    secretPrompt: "pixel art cat astronaut standing on a moon base, playful vibe, retro colors",
+  },
+];
+
+// Phase lengths (tune later; total match stays 5–15 min depending rounds)
+const PHASE_MS = {
+  reveal: 12_000,
+  submit: 45_000,
+  verdict: 8_000,
+  challenge_window: 25_000,
+  challenge_vote: 25_000,
+};
+
+export class MatchEngine {
+  constructor(io) {
+    this.io = io;
+    this.rooms = new Map(); // roomId -> RoomState
+  }
+
+  /* ---------------- Room lifecycle ---------------- */
+
+  ensureRoom(roomId) {
+    const rid = (roomId || "").trim() || "genlayer";
+    let room = this.rooms.get(rid);
+    if (!room) {
+      room = {
+        roomId: rid,
+        host: null,
+        members: [], // { wallet, displayName }
+        match: null,
+        timers: {
+          phaseTimeout: null,
+        },
+      };
+      this.rooms.set(rid, room);
+    }
+    return room;
+  }
+
+  getRoom(roomId) {
+    return this.rooms.get(roomId) || null;
+  }
+
+  // Emits canonical room state to everyone in that socket.io room
+  emitRoomState(room) {
+    this.io.to(room.roomId).emit("room:state", this.publicRoomState(room));
+  }
+
+  publicRoomState(room) {
+    return {
+      roomId: room.roomId,
+      host: room.host,
+      members: room.members,
+      match: room.match,
+    };
+  }
+
+  /* ---------------- Member management ---------------- */
+
+  joinRoom({ socket, roomId, wallet, displayName }) {
+    const room = this.ensureRoom(roomId);
+    const w = (wallet || "").toLowerCase();
+
+    if (!w.startsWith("0x") || w.length < 10) {
+      throw new Error("Invalid wallet");
+    }
+
+    // Join socket.io room
+    socket.join(room.roomId);
+
+    const existing = room.members.find((m) => m.wallet.toLowerCase() === w);
+    if (!existing) {
+      room.members.push({
+        wallet,
+        displayName: displayName || `player_${wallet.slice(2, 6)}`,
+      });
+    } else if (displayName && displayName !== existing.displayName) {
+      existing.displayName = displayName;
+    }
+
+    // Assign host if empty
+    if (!room.host) room.host = wallet;
+
+    this.emitRoomState(room);
+    return room;
+  }
+
+  leaveRoom({ socket, roomId, wallet }) {
+    const room = this.getRoom(roomId);
+    if (!room) return;
+
+    const w = (wallet || "").toLowerCase();
+    socket.leave(room.roomId);
+
+    room.members = room.members.filter((m) => m.wallet.toLowerCase() !== w);
+
+    // Reassign host if needed
+    if (room.host && room.host.toLowerCase() === w) {
+      room.host = room.members[0]?.wallet || null;
+    }
+
+    // If room empty: stop match and delete
+    if (room.members.length === 0) {
+      this.stopMatch(room);
+      this.rooms.delete(room.roomId);
+      return;
+    }
+
+    this.emitRoomState(room);
+  }
+
+  /* ---------------- Match state machine ---------------- */
+
+  startMatch({ roomId, wallet, rounds = 3 }) {
+    const room = this.getRoom(roomId);
+    if (!room) throw new Error("Room not found");
+
+    const isHost = room.host && room.host.toLowerCase() === wallet.toLowerCase();
+    if (!isHost) throw new Error("Only host can start match");
+
+    if (room.match && room.match.phase !== "completed") {
+      throw new Error("Match already running");
+    }
+
+    // Build rounds (MVP random selection)
+    const chosen = this.pickCases(rounds);
+
+    room.match = {
+      matchId: uid("match_"),
+      phase: "reveal",
+      startedAtMs: nowMs(),
+      currentRoundIndex: 0,
+      rounds: chosen.map((c) => ({
+        roundId: uid("round_"),
+        caseId: c.id,
+        imageUrl: c.imageUrl,
+        secretPrompt: c.secretPrompt, // keep server-side (MVP). Later: contract storage.
+        submissions: {}, // wallet -> { text, submittedAtMs }
+        scores: {}, // wallet -> { score, reasoning }
+      })),
+      leaderboard: {}, // roundId -> [{ wallet, score, reasoning }]
+      challenge: null, // { roundId, createdBy, reasonCode, votes: {wallet: bool}, endsAtMs }
+      phaseEndsAtMs: nowMs() + PHASE_MS.reveal,
+    };
+
+    this.emitRoomState(room);
+    this.scheduleNextPhase(room);
+  }
+
+  stopMatch(room) {
+    this.clearTimers(room);
+    if (room.match) {
+      room.match.phase = "completed";
+      room.match.phaseEndsAtMs = null;
+    }
+  }
+
+  clearTimers(room) {
+    if (room.timers?.phaseTimeout) {
+      clearTimeout(room.timers.phaseTimeout);
+      room.timers.phaseTimeout = null;
+    }
+  }
+
+  scheduleNextPhase(room) {
+    this.clearTimers(room);
+    const match = room.match;
+    if (!match) return;
+
+    const endsAt = match.phaseEndsAtMs;
+    if (!endsAt) return;
+
+    const delay = Math.max(0, endsAt - nowMs());
+    room.timers.phaseTimeout = setTimeout(() => {
+      try {
+        this.advancePhase(room.roomId);
+      } catch (e) {
+        // fail safe: mark completed rather than crash server
+        console.error("advancePhase error:", e);
+        this.stopMatch(room);
+        this.emitRoomState(room);
+      }
+    }, delay);
+  }
+
+  advancePhase(roomId) {
+    const room = this.getRoom(roomId);
+    if (!room?.match) return;
+
+    const match = room.match;
+    const phase = match.phase;
+    const round = match.rounds[match.currentRoundIndex];
+
+    if (!round) {
+      this.finishMatch(room);
+      return;
+    }
+
+    // If a challenge vote window is open, resolve it at end.
+    if (phase === "challenge_vote") {
+      this.resolveChallenge(room);
+    }
+
+    // Phase transitions
+    if (phase === "reveal") {
+      match.phase = "submit";
+      match.phaseEndsAtMs = nowMs() + PHASE_MS.submit;
+      this.emitRoomState(room);
+      return this.scheduleNextPhase(room);
+    }
+
+    if (phase === "submit") {
+      match.phase = "verdict";
+      match.phaseEndsAtMs = nowMs() + PHASE_MS.verdict;
+
+      // Score submissions (MVP server scoring). Swap later with GenLayer IC call.
+      this.scoreRound(room, round);
+
+      this.emitRoomState(room);
+      return this.scheduleNextPhase(room);
+    }
+
+    if (phase === "verdict") {
+      match.phase = "challenge_window";
+      match.phaseEndsAtMs = nowMs() + PHASE_MS.challenge_window;
+      match.challenge = null; // reset per round
+      this.emitRoomState(room);
+      return this.scheduleNextPhase(room);
+    }
+
+    if (phase === "challenge_window") {
+      // If no challenge, move on to next round
+      if (!match.challenge) {
+        return this.nextRoundOrFinish(room);
+      }
+
+      // If a challenge exists but vote never started (shouldn't happen), start vote anyway
+      match.phase = "challenge_vote";
+      match.phaseEndsAtMs = nowMs() + PHASE_MS.challenge_vote;
+      if (!match.challenge.endsAtMs) match.challenge.endsAtMs = match.phaseEndsAtMs;
+
+      this.emitRoomState(room);
+      return this.scheduleNextPhase(room);
+    }
+
+    if (phase === "challenge_vote") {
+      // After resolveChallenge in beginning of this function, move on
+      return this.nextRoundOrFinish(room);
+    }
+
+    if (phase === "completed") return;
+  }
+
+  nextRoundOrFinish(room) {
+    const match = room.match;
+    if (!match) return;
+
+    const nextIndex = match.currentRoundIndex + 1;
+    if (nextIndex >= match.rounds.length) {
+      this.finishMatch(room);
+      this.emitRoomState(room);
+      return;
+    }
+
+    match.currentRoundIndex = nextIndex;
+    match.phase = "reveal";
+    match.phaseEndsAtMs = nowMs() + PHASE_MS.reveal;
+    match.challenge = null;
+
+    this.emitRoomState(room);
+    this.scheduleNextPhase(room);
+  }
+
+  finishMatch(room) {
+    this.clearTimers(room);
+    if (!room.match) return;
+
+    const match = room.match;
+
+    // Mark completed
+    match.phase = "completed";
+    match.phaseEndsAtMs = null;
+
+    // Compute match XP (A): sum of round scores (0–100 each)
+    const totals = new Map(); // walletLower -> totalXp
+    const roundsCount = match.rounds?.length || 0;
+
+    for (const r of match.rounds || []) {
+      for (const [walletLower, s] of Object.entries(r.scores || {})) {
+        const prev = totals.get(walletLower) || 0;
+        totals.set(walletLower, prev + Number(s?.score || 0));
+      }
+    }
+
+    const list = [...totals.entries()].map(([walletLower, totalXp]) => {
+      const member = (room.members || []).find((m) => (m.wallet || "").toLowerCase() === walletLower);
+      const wallet = member?.wallet || walletLower;
+      const displayName = member?.displayName || `player_${walletLower.slice(2, 6)}`;
+      return {
+        wallet,
+        displayName,
+        totalXp: Math.round(totalXp),
+        rounds: roundsCount,
+      };
+    });
+
+    list.sort((a, b) => b.totalXp - a.totalXp);
+
+    // Used by UI: Final Leaderboard (Total XP)
+    match.finalLeaderboard = list;
+
+    // Persist to SQLite (all-time XP) ONCE per match
+    if (!match._xpPersisted) {
+      for (const p of list) {
+        try {
+          addXp({ wallet: p.wallet, deltaXp: p.totalXp, displayName: p.displayName });
+        } catch (e) {
+          console.error("addXp failed:", e);
+        }
+      }
+      match._xpPersisted = true;
+    }
+  }
+
+    }
+
+    const finalLeaderboard = Array.from(totals.entries()).map(([walletLower, t]) => {
+      const m = byLower.get(walletLower);
+      return {
+        wallet: m?.wallet || walletLower,
+        displayName: m?.displayName || `player_${walletLower.slice(2, 6)}`,
+        totalXp: t.totalXp,
+        roundsPlayed: t.roundsPlayed,
+      };
+    });
+
+    finalLeaderboard.sort((a, b) => b.totalXp - a.totalXp);
+
+    room.match.finalLeaderboard = finalLeaderboard;
+
+    // Final leaderboard (per match) + persist XP globally
+    this.buildFinalLeaderboardAndPersist(room);
+
+    // Later: on-chain XP + contract-based settlement
+  }
+
+  /* ---------------- Submissions ---------------- */
+
+  submit({ roomId, wallet, roundId, text }) {
+    const room = this.getRoom(roomId);
+    if (!room?.match) return;
+
+    const match = room.match;
+    if (match.phase !== "submit") return;
+
+    const round = match.rounds.find((r) => r.roundId === roundId);
+    if (!round) return;
+
+    const w = wallet.toLowerCase();
+    const t = (text || "").trim();
+    if (!t) return;
+
+    round.submissions[w] = { text: t.slice(0, 240), submittedAtMs: nowMs() };
+
+    this.emitRoomState(room);
+  }
+
+  /* ---------------- Challenge / voting ---------------- */
+
+  createChallenge({ roomId, wallet, roundId, reasonCode = "too_harsh" }) {
+    const room = this.getRoom(roomId);
+    if (!room?.match) return;
+
+    const match = room.match;
+    if (match.phase !== "challenge_window") return;
+
+    if (match.challenge) return; // only one challenge per round (MVP)
+
+    match.challenge = {
+      roundId,
+      createdBy: wallet,
+      reasonCode,
+      votes: {}, // wallet -> boolean
+      endsAtMs: nowMs() + PHASE_MS.challenge_vote,
+    };
+
+    // Immediately enter vote phase
+    match.phase = "challenge_vote";
+    match.phaseEndsAtMs = match.challenge.endsAtMs;
+
+    this.emitRoomState(room);
+    this.scheduleNextPhase(room);
+  }
+
+  voteChallenge({ roomId, wallet, voteYes }) {
+    const room = this.getRoom(roomId);
+    if (!room?.match) return;
+
+    const match = room.match;
+    if (match.phase !== "challenge_vote") return;
+
+    const ch = match.challenge;
+    if (!ch) return;
+
+    const w = wallet.toLowerCase();
+    ch.votes[w] = !!voteYes;
+
+    this.emitRoomState(room);
+  }
+
+  resolveChallenge(room) {
+    const match = room.match;
+    if (!match?.challenge) return;
+
+    const ch = match.challenge;
+    const round = match.rounds.find((r) => r.roundId === ch.roundId);
+    if (!round) return;
+
+    const votes = Object.values(ch.votes || {});
+    const yes = votes.filter(Boolean).length;
+    const no = votes.length - yes;
+
+    // Simple majority rule (MVP)
+    const overturn = yes > no && votes.length > 0;
+
+    if (overturn) {
+      // MVP: bump scores modestly (later: contract re-judge / democratic adjustment)
+      for (const w of Object.keys(round.scores)) {
+        round.scores[w].score = clamp(round.scores[w].score + 8, 0, 100);
+        round.scores[w].reasoning = "Democracy override: crowd agreed the judge was too harsh.";
+      }
+      // Rebuild leaderboard after modification
+      this.buildLeaderboard(match, round);
+    }
+
+    // challenge resolved
+    match.challenge = {
+      ...ch,
+      resolved: true,
+      result: overturn ? "overturned" : "upheld",
+      yes,
+      no,
+    };
+  }
+
+  /* ---------------- Scoring (MVP server scoring) ---------------- */
+
+  scoreRound(room, round) {
+    // If nobody submitted, still create empty leaderboard
+    const entries = Object.entries(round.submissions || {});
+    const scores = {};
+
+    for (const [walletLower, sub] of entries) {
+      const guess = sub.text || "";
+      const secret = round.secretPrompt || "";
+
+      const score = this.simpleSemanticScore(guess, secret);
+      const reasoning = this.oneSentenceReasoning(score, guess, secret);
+
+      scores[walletLower] = { score, reasoning };
+    }
+
+    round.scores = scores;
+    this.buildLeaderboard(room, room.match, round);
+}
+
+  buildLeaderboard(room, match, round) {
+    const members = room?.members || [];
+    const nameByLower = new Map(
+      members.map((m) => [String(m.wallet || "").toLowerCase(), m.displayName])
+    );
+
+    const list = Object.entries(round.scores || {}).map(([walletLower, sc]) => {
+      const displayName = nameByLower.get(walletLower) || `player_${walletLower.slice(2, 6)}`;
+      return {
+        wallet: walletLower, // keep wallet (lowercase is fine for UI shortAddr)
+        displayName,
+        score: sc.score,
+        reasoning: sc.reasoning,
+      };
+    });
+
+    list.sort((a, b) => b.score - a.score);
+    match.leaderboard = match.leaderboard || {};
+    match.leaderboard[round.roundId] = list;
+  }
+
+  walletFromLower(match, walletLower) {
+    // preserve original casing if possible (members store actual wallet)
+    return walletLower.startsWith("0x") ? walletLower : walletLower;
+  }
+
+  simpleSemanticScore(guess, secret) {
+    // MVP heuristic: token overlap + length sanity.
+    // Swap later with IC multimodal/semantic judge call.
+    const g = (guess || "").toLowerCase();
+    const s = (secret || "").toLowerCase();
+
+    const gt = new Set(g.split(/[^a-z0-9]+/).filter(Boolean));
+    const st = new Set(s.split(/[^a-z0-9]+/).filter(Boolean));
+
+    let inter = 0;
+    for (const t of gt) if (st.has(t)) inter++;
+
+    const union = new Set([...gt, ...st]).size || 1;
+    const jaccard = inter / union;
+
+    // favor descriptive guesses
+    const lenBonus = clamp(g.length / 180, 0, 1) * 0.12;
+
+    const raw = (jaccard * 0.88 + lenBonus) * 100;
+    return Math.round(clamp(raw, 0, 100));
+  }
+
+  oneSentenceReasoning(score, guess, secret) {
+    if (score >= 85) return "Strong match on subject and style—your prompt captures the intent closely.";
+    if (score >= 70) return "Good alignment overall, but a few key details or stylistic cues are missing.";
+    if (score >= 55) return "Some correct elements, though the core style/scene differs from the target prompt.";
+    if (score >= 35) return "Partial overlap, but the prompt’s main subject and tone don’t match well.";
+    return "Low similarity—your guess misses the prompt’s core subject, setting, and style.";
+  }
+
+  buildFinalLeaderboardAndPersist(room) {
+    const match = room.match;
+    if (!match) return;
+
+    // walletLower -> { xp, roundsPlayed }
+    const totals = new Map();
+
+    for (const r of match.rounds || []) {
+      for (const [walletLower, s] of Object.entries(r.scores || {})) {
+        const prev = totals.get(walletLower) || { xp: 0, roundsPlayed: 0 };
+        // MVP XP rule: XP = score (0-100) per round
+        prev.xp += Math.max(0, Math.floor(Number(s.score || 0)));
+        prev.roundsPlayed += 1;
+        totals.set(walletLower, prev);
+      }
+    }
+
+    const nameByWalletLower = new Map(
+      (room.members || []).map(m => [(m.wallet || "").toLowerCase(), m.displayName || `player_${(m.wallet || "").slice(2,6)}`])
+    );
+
+    const list = Array.from(totals.entries()).map(([walletLower, t]) => {
+      const displayName = nameByWalletLower.get(walletLower) || `player_${walletLower.slice(2,6)}`;
+      return {
+        wallet: walletLower,
+        displayName,
+        xp: t.xp,
+        roundsPlayed: t.roundsPlayed,
+      };
+    });
+
+    list.sort((a,b) => (b.xp - a.xp) || a.wallet.localeCompare(b.wallet));
+    match.finalLeaderboard = list;
+
+    // Persist to global XP store
+    for (const row of list) {
+      try {
+        addXp({ wallet: row.wallet, xp: row.xp, displayName: row.displayName });
+      } catch (e) {
+        console.error("addXp failed:", e);
+      }
+    }
+  }
+
+  pickCases(n) {
+    const count = clamp(Number(n || 3), 1, 5);
+    const shuffled = [...CASES].sort(() => Math.random() - 0.5);
+    const selected = shuffled.slice(0, count);
+    // If not enough, wrap (MVP)
+    while (selected.length < count) selected.push(...shuffled);
+    return selected.slice(0, count);
+  }

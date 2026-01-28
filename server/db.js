@@ -1,8 +1,14 @@
 import Database from "better-sqlite3";
 import path from "path";
+import { fileURLToPath } from "url";
 
-const dbPath = process.env.DB_PATH || path.join(process.cwd(), "prompt-heist.sqlite");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Always store the DB next to this file unless DB_PATH is explicitly set
+const dbPath = process.env.DB_PATH || path.join(__dirname, "prompt-heist.sqlite");
 export const db = new Database(dbPath);
+console.log("DB:", dbPath);
 
 db.pragma("journal_mode = WAL");
 

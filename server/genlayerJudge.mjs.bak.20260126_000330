@@ -1,0 +1,68 @@
+import { execFile } from "node:child_process";
+import dotenv from "dotenv";
+
+dotenv.config({ path: new URL("./.env", import.meta.url) });
+
+const RPC = process.env.GENLAYER_RPC;
+const ADDR = process.env.GENLAYER_JUDGE_ADDRESS;
+const CWD = process.env.GENLAYER_PROJECT_DIR;
+
+if (!RPC || !ADDR || !CWD) {
+  throw new Error("Missing GENLAYER_RPC / GENLAYER_JUDGE_ADDRESS / GENLAYER_PROJECT_DIR in server/.env");
+}
+
+function execFileP(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { ...opts }, (err, stdout, stderr) => {
+      if (err) {
+        const msg = (stderr || stdout || err.message || "").toString();
+        return reject(new Error(msg));
+      }
+      resolve({ stdout: String(stdout || ""), stderr: String(stderr || "") });
+    });
+  });
+}
+
+// Extract the last JSON object printed by the CLI.
+function parseJsonLoose(txt) {
+  const s = (txt || "").trim();
+  const start = s.lastIndexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("No JSON found in genlayer output:\n" + s);
+  }
+  return JSON.parse(s.slice(start, end + 1));
+}
+
+export async function judgeGuess({ guess, secret }) {
+  const cliArgs = [
+    "-y",
+    "genlayer@0.33.0",
+    "call",
+    "--rpc",
+    RPC,
+    ADDR,
+    "score_guess",
+    "--args",
+    String(guess ?? ""),
+    String(secret ?? ""),
+  ];
+
+  const { stdout, stderr } = await execFileP("npx", cliArgs, {
+    cwd: CWD,
+    timeout: 90_000,
+  });
+
+  const out = (stdout + "\n" + stderr).trim();
+  const j = parseJsonLoose(out);
+
+  const score = Number(j.score ?? 0);
+  const reasoning = String(j.reasoning ?? "");
+  const xpDelta = Number(j.xpDelta ?? score ?? 0);
+
+  return {
+    score: Number.isFinite(score) ? score : 0,
+    reasoning,
+    xpDelta: Number.isFinite(xpDelta) ? xpDelta : 0,
+  };
+}

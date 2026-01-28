@@ -1,0 +1,16 @@
+{
+  "players": {
+    "0x367a3f281eb7f24e699559a273e2266434c4c37c": {
+      "wallet": "0x367a3f281eb7f24e699559a273e2266434c4c37c",
+      "displayName": "Luke",
+      "xp": 41,
+      "updatedAt": 1769553540071
+    },
+    "0xb34fd40484852ece5d77c74f0242811b939998d4": {
+      "wallet": "0xb34fd40484852ece5d77c74f0242811b939998d4",
+      "displayName": "Mike",
+      "xp": 17,
+      "updatedAt": 1769494693944
+    }
+  }
+}
