@@ -1,50 +1,26 @@
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import http from 'http';
-import { Server } from 'socket.io';
-import { z } from 'zod';
-import { recoverMessageAddress } from 'viem';
+import "dotenv/config";
 import dotenv from "dotenv";
-dotenv.config({ path: new URL("./.env", import.meta.url) });
-const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
+import express from "express";
+import cors from "cors";
+import http from "http";
+import { Server } from "socket.io";
+import { z } from "zod";
+import { recoverMessageAddress } from "viem";
+import { topPlayers, upsertPlayer } from "./db.js";
+import { MatchEngine } from "./matchEngine.js";
 
-import { topPlayers } from './db.js';
-import { upsertPlayer, getGlobalLeaderboard } from './leaderboardStore.js';
-import { MatchEngine } from './matchEngine.js';
+dotenv.config({ path: new URL("./.env", import.meta.url) });
+
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
+const PORT = Number(process.env.PORT || 3001);
+const SIGNATURE_MAX_AGE_SECONDS = 10 * 60;
+
 const app = express();
 app.use(cors({
   origin: CORS_ORIGIN,
   credentials: true,
 }));
 app.use(express.json());
-
-/* PATCH: GLOBAL_LEADERBOARD_FROM_DB */
-app.get('/api/leaderboard/global', (req, res) => {
-  try {
-    const rows = topPlayers(25);
-    return res.json({
-      ok: true,
-      players: rows.map((p) => ({
-        wallet: p.wallet,
-        displayName: p.displayName,
-        xp: p.totalXp,                 // DB column -> API field
-        updatedAt: (p.updatedAt || 0) * 1000, // DB stores seconds, UI expects ms
-      })),
-    });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
-
-
-app.get('/api/leaderboard/global', (req, res) => {
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 25)));
-  const players = getGlobalLeaderboard(limit);
-  
-    res.json({ ok: true, players });
-});
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -55,288 +31,246 @@ const io = new Server(server, {
 });
 
 const engine = new MatchEngine(io);
+const users = new Map();
 
-const PORT = Number(process.env.PORT || 3001);
-
-// --------------------
-// In-memory MVP storage
-// --------------------
-/**
- * For MVP we keep state in memory.
- * For production, move to Postgres/Redis.
- */
-const users = new Map(); // wallet -> { displayName, updatedAt }
-const rooms = new Map(); // roomId -> { host, members: Map(wallet->{displayName}), state }
-const matches = new Map(); // roomId -> { rounds, currentRoundIndex, phase, phaseEndsAt, submissions, leaderboard, challenge }
+const WalletSchema = z.string().regex(/^0x[a-fA-F0-9]{40}$/);
+const RoomIdSchema = z.string().trim().min(1).max(48).regex(/^[a-zA-Z0-9_-]+$/);
 
 const NameSchema = z.object({
-  wallet: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  wallet: WalletSchema,
   displayName: z.string().min(1).max(20).regex(/^[a-zA-Z0-9_]+$/),
   timestamp: z.number().int().positive(),
-  signature: z.string().min(10)
+  signature: z.string().min(10),
 });
 
-app.get('/health', (_req, res) => res.json({ ok: true }));
+const JoinSchema = z.object({
+  roomId: RoomIdSchema.optional().default("genlayer"),
+  wallet: WalletSchema,
+  timestamp: z.number().int().positive(),
+  signature: z.string().min(10),
+});
 
-/**
- * POST /api/profile/display-name
- * Body: { wallet, displayName, timestamp, signature }
- *
- * The client signs:
- *   "Set display name to <displayName> at <timestamp>"
- */
-app.post('/api/profile/display-name', async (req, res) => {
-  const parsed = NameSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+const RoomSchema = z.object({
+  roomId: RoomIdSchema.optional().default("genlayer"),
+});
 
-  const { wallet, displayName, timestamp, signature } = parsed.data;
-  const message = `Set display name to ${displayName} at ${timestamp}`;
+const SubmitSchema = RoomSchema.extend({
+  roundId: z.string().min(1).max(80),
+  text: z.string().min(1).max(240),
+});
 
+const ChallengeCreateSchema = RoomSchema.extend({
+  roundId: z.string().min(1).max(80),
+  reasonCode: z.enum(["too_harsh", "missed_style", "missed_subject"]).optional(),
+});
+
+const ChallengeVoteSchema = RoomSchema.extend({
+  voteYes: z.boolean(),
+});
+
+function nowSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function assertFreshTimestamp(timestamp) {
+  if (Math.abs(nowSeconds() - timestamp) > SIGNATURE_MAX_AGE_SECONDS) {
+    throw new Error("Signature timestamp is too old");
+  }
+}
+
+function joinMessage(roomId, timestamp) {
+  return `Join Prompt Heist room ${roomId} at ${timestamp}`;
+}
+
+function nameMessage(displayName, timestamp) {
+  return `Set display name to ${displayName} at ${timestamp}`;
+}
+
+function emitError(socket, error) {
+  socket.emit("app:error", { message: error?.message || String(error) });
+}
+
+function requireWallet(socket) {
+  const wallet = socket.data.wallet;
+  if (!wallet) throw new Error("Join a room with a signed wallet session first");
+  return wallet;
+}
+
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+app.get("/api/leaderboard/global", (req, res) => {
   try {
-    const recovered = await recoverMessageAddress({ message, signature });
-    if (recovered.toLowerCase() !== wallet.toLowerCase()) {
-      return res.status(401).json({ ok: false, error: 'Signature does not match wallet' });
-    }
-
-    users.set(wallet.toLowerCase(), { displayName, updatedAt: Date.now() });
-    // Persist name to global leaderboard DB
-    try {
-      upsertPlayer({ wallet, displayName });
-    } catch (e) {
-      console.error("upsertPlayer failed:", e);
-    }
-
-    return res.json({ ok: true });
-} catch (e) {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 25)));
+    const rows = topPlayers(limit);
+    return res.json({
+      ok: true,
+      players: rows.map((p) => ({
+        wallet: p.wallet,
+        displayName: p.displayName,
+        xp: p.totalXp,
+        updatedAt: (p.updatedAt || 0) * 1000,
+      })),
+    });
+  } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-// --------------------
-// Socket.IO (Rooms + Match State)
-// --------------------
-function getOrCreateRoom(roomId, hostWallet) {
-  if (!rooms.has(roomId)) {
-    rooms.set(roomId, {
-      host: hostWallet,
-      members: new Map(),
-      createdAt: Date.now()
+app.post("/api/profile/display-name", async (req, res) => {
+  const parsed = NameSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+
+  const { wallet, displayName, timestamp, signature } = parsed.data;
+  try {
+    assertFreshTimestamp(timestamp);
+    const recovered = await recoverMessageAddress({
+      message: nameMessage(displayName, timestamp),
+      signature,
     });
+
+    if (recovered.toLowerCase() !== wallet.toLowerCase()) {
+      return res.status(401).json({ ok: false, error: "Signature does not match wallet" });
+    }
+
+    users.set(wallet.toLowerCase(), { displayName, updatedAt: Date.now() });
+    upsertPlayer({ wallet, displayName });
+    engine.updateDisplayName({ wallet, displayName });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
-  return rooms.get(roomId);
-}
+});
 
-function nowMs() { return Date.now(); }
+io.on("connection", (socket) => {
+  socket.on("room:join", async (payload) => {
+    try {
+      const parsed = JoinSchema.safeParse(payload || {});
+      if (!parsed.success) throw new Error("Invalid join payload");
 
-function emitRoomState(roomId) {
-  const room = rooms.get(roomId);
-  const match = matches.get(roomId);
-  const members = [...(room?.members ?? new Map()).entries()].map(([wallet, m]) => ({ wallet, displayName: m.displayName }));
-  io.to(roomId).emit('room:state', {
-    roomId,
-    host: room?.host ?? null,
-    members,
-    match: match ?? null
-  });
-}
+      const { roomId, wallet, timestamp, signature } = parsed.data;
+      assertFreshTimestamp(timestamp);
 
-function startMatch(roomId) {
-  // MVP content: hardcoded 3 rounds (replace with weekly pack file on disk)
-  const rounds = [
-    {
-      roundId: 'r1',
-      imageUrl: 'https://picsum.photos/seed/genlayer1/800/500',
-      schemaHint: { theme: 'Cyberpunk Animals' }
-    },
-    {
-      roundId: 'r2',
-      imageUrl: 'https://picsum.photos/seed/genlayer2/800/500',
-      schemaHint: { theme: 'Cyberpunk Animals' }
-    },
-    {
-      roundId: 'r3',
-      imageUrl: 'https://picsum.photos/seed/genlayer3/800/500',
-      schemaHint: { theme: 'Cyberpunk Animals' }
-    }
-  ];
+      const recovered = await recoverMessageAddress({
+        message: joinMessage(roomId, timestamp),
+        signature,
+      });
 
-  const match = {
-    rounds,
-    currentRoundIndex: 0,
-    phase: 'reveal', // reveal -> submit -> verdict -> challenge(optional) -> next
-    phaseEndsAt: nowMs() + 30_000,
-    submissions: {}, // roundId -> { wallet -> text }
-    leaderboard: {}, // roundId -> array of {wallet, score, reasoning}
-    challenge: null  // { roundId, createdAt, endsAt, votes: {wallet: boolean}, reasonCode }
-  };
+      if (recovered.toLowerCase() !== wallet.toLowerCase()) {
+        throw new Error("Join signature does not match wallet");
+      }
 
-  matches.set(roomId, match);
-  schedulePhaseTick(roomId);
-  emitRoomState(roomId);
-}
+      socket.data.wallet = wallet;
+      socket.data.roomId = roomId;
 
-/* OLD_SCHEDULER_DISABLED
-function schedulePhaseTick(roomId) {
-  const tick = () => {
-    const match = matches.get(roomId);
-    if (!match) return;
-
-    const { phase, phaseEndsAt } = match;
-    if (nowMs() < phaseEndsAt) {
-      setTimeout(tick, 250);
-      return;
-    }
-
-    // Phase transitions
-    const currentRound = match.rounds[match.currentRoundIndex];
-    if (!currentRound) {
-      match.phase = 'completed';
-      emitRoomState(roomId);
-      return;
-    }
-
-    if (phase === 'reveal') {
-      match.phase = 'submit';
-      match.phaseEndsAt = nowMs() + 75_000;
-      emitRoomState(roomId);
-      setTimeout(tick, 250);
-      return;
-    }
-
-    if (phase === 'submit') {
-      match.phase = 'verdict';
-      match.phaseEndsAt = nowMs() + 20_000; // UI breathing room while we "score"
-      // TODO: call GenLayer IC score_round here
-      // For MVP scaffolding, we create a mock leaderboard.
-      const roundId = currentRound.roundId;
-      const subs = match.submissions[roundId] || {};
-      const scored = Object.entries(subs).map(([wallet, text]) => ({
+      const u = users.get(wallet.toLowerCase());
+      const room = engine.joinRoom({
+        socket,
+        roomId,
         wallet,
-        score: Math.min(100, 40 + text.length % 61),
-        reasoning: 'Mock judge: scored by length; replace with IC reasoning.'
-      })).sort((a, b) => b.score - a.score);
-      match.leaderboard[roundId] = scored;
-
-      emitRoomState(roomId);
-      setTimeout(tick, 250);
-      return;
-    }
-
-    if (phase === 'verdict') {
-      // Open a short window where someone may initiate a challenge.
-      match.phase = 'challenge_window';
-      match.phaseEndsAt = nowMs() + 20_000;
-      emitRoomState(roomId);
-      setTimeout(tick, 250);
-      return;
-    }
-
-    if (phase === 'challenge_window') {
-      // If no challenge triggered, advance to next round reveal
-      if (!match.challenge) {
-        match.currentRoundIndex += 1;
-        match.phase = 'reveal';
-        match.phaseEndsAt = nowMs() + 30_000;
-        emitRoomState(roomId);
-        setTimeout(tick, 250);
-        return;
-      } else {
-        // challenge already created, go to full voting
-        match.phase = 'challenge_vote';
-        match.phaseEndsAt = match.challenge.endsAt;
-        emitRoomState(roomId);
-        setTimeout(tick, 250);
-        return;
-      }
-    }
-
-    if (phase === 'challenge_vote') {
-      // TODO: call GenLayer IC resolve_challenge here based on votes
-      // MVP: if YES votes > NO votes, add +3 to everyone (example)
-      const ch = match.challenge;
-      const votes = ch?.votes || {};
-      let yes = 0, no = 0;
-      for (const v of Object.values(votes)) (v ? yes++ : no++);
-      const passed = yes > no;
-
-      const roundId = ch.roundId;
-      if (passed) {
-        const lb = match.leaderboard[roundId] || [];
-        match.leaderboard[roundId] = lb.map(x => ({ ...x, score: Math.min(100, x.score + 3), reasoning: x.reasoning + ' (+3 via mock democracy)' }))
-          .sort((a, b) => b.score - a.score);
-      }
-
-      match.challenge = null;
-      match.currentRoundIndex += 1;
-      match.phase = 'reveal';
-      match.phaseEndsAt = nowMs() + 30_000;
-      emitRoomState(roomId);
-      setTimeout(tick, 250);
-      return;
-    }
-
-    // fallback
-    setTimeout(tick, 250);
-  };
-
-  setTimeout(tick, 250);
-}
-
-
-END_OLD_SCHEDULER_DISABLED */
-
-io.on('connection', (socket) => {
-
-  socket.on('room:join', (payload) => {
-    try {
-      const { roomId, wallet } = payload || {};
-      const w = (wallet || '').toLowerCase();
-      const u = users.get(w);
-      const displayName = u?.displayName;
-      engine.joinRoom({ socket, roomId, wallet, displayName });
+        displayName: u?.displayName,
+      });
+      socket.emit("room:joined", { roomId: room.roomId, wallet });
     } catch (e) {
-      socket.emit('error', { message: e?.message || String(e) });
+      emitError(socket, e);
     }
   });
-socket.on('room:leave', (payload) => {
+
+  socket.on("room:leave", (payload) => {
     try {
-      const { roomId, wallet } = payload || {};
+      const parsed = RoomSchema.safeParse(payload || {});
+      if (!parsed.success) throw new Error("Invalid room payload");
+
+      const wallet = requireWallet(socket);
+      const roomId = parsed.data.roomId || socket.data.roomId || "genlayer";
       engine.leaveRoom({ socket, roomId, wallet });
+      socket.data.roomId = null;
     } catch (e) {
-      socket.emit('error', { message: e?.message || String(e) });
+      emitError(socket, e);
     }
   });
 
-  socket.on('match:start', (payload) => {
+  socket.on("match:start", (payload) => {
     try {
-      const { roomId, wallet } = payload || {};
-      engine.startMatch({ roomId, wallet, rounds: 3 });
+      const parsed = RoomSchema.safeParse(payload || {});
+      if (!parsed.success) throw new Error("Invalid room payload");
+
+      engine.startMatch({
+        roomId: parsed.data.roomId,
+        wallet: requireWallet(socket),
+        rounds: 3,
+      });
     } catch (e) {
-      socket.emit('error', { message: e?.message || String(e) });
+      emitError(socket, e);
     }
   });
 
-  socket.on('round:submit', (payload) => {
+  socket.on("round:submit", (payload) => {
     try {
-      engine.submit(payload || {});
+      const parsed = SubmitSchema.safeParse(payload || {});
+      if (!parsed.success) throw new Error("Invalid submission payload");
+
+      engine.submit({
+        roomId: parsed.data.roomId,
+        wallet: requireWallet(socket),
+        roundId: parsed.data.roundId,
+        text: parsed.data.text,
+      });
     } catch (e) {
-      socket.emit('error', { message: e?.message || String(e) });
+      emitError(socket, e);
     }
   });
 
-  socket.on('challenge:create', (payload) => {
+  socket.on("round:retry-judge", (payload) => {
     try {
-      engine.createChallenge(payload || {});
+      const parsed = RoomSchema.safeParse(payload || {});
+      if (!parsed.success) throw new Error("Invalid room payload");
+
+      engine.retryJudge({
+        roomId: parsed.data.roomId,
+        wallet: requireWallet(socket),
+      });
     } catch (e) {
-      socket.emit('error', { message: e?.message || String(e) });
+      emitError(socket, e);
     }
   });
 
-  socket.on('challenge:vote', (payload) => {
+  socket.on("challenge:create", (payload) => {
     try {
-      engine.voteChallenge(payload || {});
+      const parsed = ChallengeCreateSchema.safeParse(payload || {});
+      if (!parsed.success) throw new Error("Invalid challenge payload");
+
+      engine.createChallenge({
+        roomId: parsed.data.roomId,
+        wallet: requireWallet(socket),
+        roundId: parsed.data.roundId,
+        reasonCode: parsed.data.reasonCode || "too_harsh",
+      });
     } catch (e) {
-      socket.emit('error', { message: e?.message || String(e) });
+      emitError(socket, e);
+    }
+  });
+
+  socket.on("challenge:vote", (payload) => {
+    try {
+      const parsed = ChallengeVoteSchema.safeParse(payload || {});
+      if (!parsed.success) throw new Error("Invalid vote payload");
+
+      engine.voteChallenge({
+        roomId: parsed.data.roomId,
+        wallet: requireWallet(socket),
+        voteYes: parsed.data.voteYes,
+      });
+    } catch (e) {
+      emitError(socket, e);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    const wallet = socket.data.wallet;
+    const roomId = socket.data.roomId;
+    if (wallet && roomId) {
+      engine.leaveRoom({ socket, roomId, wallet });
     }
   });
 });

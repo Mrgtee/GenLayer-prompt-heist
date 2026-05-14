@@ -17,8 +17,8 @@ export function loadCases(packFile = "pack_v1.json") {
   const raw = fs.readFileSync(packPath, "utf8");
   const data = JSON.parse(raw);
 
-  if (!Array.isArray(data) || data.length < 10) {
-    throw new Error(`Invalid case pack: expected an array (>=10). Got: ${typeof data}`);
+  if (!Array.isArray(data) || data.length < 5) {
+    throw new Error(`Invalid case pack: expected an array (>=5). Got: ${typeof data}`);
   }
 
   const seenIds = new Set();

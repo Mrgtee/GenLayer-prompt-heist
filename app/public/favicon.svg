@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Prompt Heist">
+  <rect width="64" height="64" rx="14" fill="#090b12"/>
+  <path d="M18 24c0-7.7 6.3-14 14-14s14 6.3 14 14v8h-6v-8c0-4.4-3.6-8-8-8s-8 3.6-8 8v8h-6z" fill="#8ef3ff"/>
+  <rect x="13" y="29" width="38" height="25" rx="7" fill="#ffb547"/>
+  <circle cx="32" cy="41" r="4" fill="#090b12"/>
+  <path d="M32 44v6" stroke="#090b12" stroke-width="4" stroke-linecap="round"/>
+  <path d="M17 33h30" stroke="#fff4c8" stroke-width="2" stroke-linecap="round" opacity=".55"/>
+</svg>

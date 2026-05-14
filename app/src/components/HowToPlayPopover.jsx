@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion as Motion } from "framer-motion";
 import { useEffect, useRef } from "react";
 
 function useOutsideClick(ref, onClose) {
@@ -26,7 +26,7 @@ export default function HowToPlayPopover({ open, onClose }) {
   return (
     <AnimatePresence>
       {open && (
-        <motion.div
+        <Motion.div
           className="fixed inset-0 z-[200] bg-black/40 backdrop-blur-[2px]"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -34,7 +34,7 @@ export default function HowToPlayPopover({ open, onClose }) {
         >
           <div className="mx-auto max-w-6xl px-4">
             <div className="relative">
-              <motion.div
+              <Motion.div
                 ref={panelRef}
                 className="absolute right-0 top-16 w-full max-w-lg rounded-3xl border border-white/10 bg-black/70 p-4 shadow-noir"
                 initial={{ opacity: 0, y: 10, scale: 0.98 }}
@@ -88,10 +88,10 @@ export default function HowToPlayPopover({ open, onClose }) {
                     Got it
                   </button>
                 </div>
-              </motion.div>
+              </Motion.div>
             </div>
           </div>
-        </motion.div>
+        </Motion.div>
       )}
     </AnimatePresence>
   );

@@ -1,13 +1,8 @@
 {
-  "name": "genlayer-project",
+  "name": "prompt-heist-genlayer",
   "type": "module",
   "private": true,
-  "workspaces": ["frontend"],
   "scripts": {
-    "dev": "cd frontend && npm run dev",
-    "build": "cd frontend && npm run build",
-    "start": "cd frontend && npm run start",
-    "lint": "cd frontend && npm run lint",
     "deploy": "genlayer deploy"
   },
   "devDependencies": {

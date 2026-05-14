@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" role="img" aria-label="Floating observatory over a desert canyon at sunset">
+  <defs>
+    <linearGradient id="sunset" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b2348"/>
+      <stop offset=".48" stop-color="#ee8054"/>
+      <stop offset="1" stop-color="#181326"/>
+    </linearGradient>
+    <linearGradient id="rock" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d77b45"/>
+      <stop offset="1" stop-color="#5b2d31"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="700" fill="url(#sunset)"/>
+  <circle cx="782" cy="190" r="88" fill="#ffd36f" opacity=".75"/>
+  <path d="M0 524 210 390l148 68 144-106 172 108 185-96 341 182v154H0z" fill="#2e2030"/>
+  <path d="M0 590 194 467l132 60 127-93 156 98 176-82 415 156v94H0z" fill="url(#rock)"/>
+  <g transform="translate(440 170)">
+    <path d="M22 280 208 390l260-142-188-112z" fill="#3a3247"/>
+    <path d="M208 390v94L468 342v-94z" fill="#24243d"/>
+    <path d="M22 280v92l186 112v-94z" fill="#2f2840"/>
+    <ellipse cx="245" cy="202" rx="154" ry="72" fill="#4c607e"/>
+    <ellipse cx="245" cy="184" rx="116" ry="50" fill="#8bc6d9"/>
+    <path d="M152 184c20-65 70-103 148-113 48 20 80 58 96 113z" fill="#ddebf0"/>
+    <path d="M245 82v-76M204 99l-48-64M287 99l48-64" stroke="#eef7ff" stroke-width="12" stroke-linecap="round"/>
+    <circle cx="245" cy="184" r="22" fill="#1e263c"/>
+  </g>
+  <g fill="#fff7d7" opacity=".65">
+    <circle cx="134" cy="112" r="3"/><circle cx="220" cy="86" r="2"/><circle cx="1000" cy="82" r="3"/><circle cx="1072" cy="140" r="2"/>
+  </g>
+</svg>

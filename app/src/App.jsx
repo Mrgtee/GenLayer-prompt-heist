@@ -2,12 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
 import { createWalletClient, custom } from "viem";
 import { defineChain } from "viem";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion as Motion, AnimatePresence } from "framer-motion";
 import HowToPlayPopover from "./components/HowToPlayPopover.jsx";
 
-const serverUrl = import.meta.env.VITE_SERVER_URL;
-const chainId = Number(import.meta.env.VITE_CHAIN_ID);
-const rpcHttp = import.meta.env.VITE_RPC_HTTP;
+const serverUrl = import.meta.env.VITE_SERVER_URL || "http://localhost:3001";
 
 const genlayerStudio = defineChain({
   id: Number(import.meta.env.VITE_CHAIN_ID || 61999),
@@ -24,6 +22,12 @@ function clampName(name, fallback) {
   return n ? n.slice(0, 20) : fallback;
 }
 
+function normalizeRoomId(value) {
+  const trimmed = (value || "").trim();
+  const safe = trimmed.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 48);
+  return safe || "genlayer";
+}
+
 export default function App() {
   const [wallet, setWallet] = useState(null);
   const [displayName, setDisplayName] = useState("");
@@ -33,17 +37,49 @@ export default function App() {
   const [roomId, setRoomId] = useState("genlayer");
   const [joined, setJoined] = useState(false);
   const [roomState, setRoomState] = useState(null);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [socketError, setSocketError] = useState("");
 
   // UI tabs (maps to real features so we don’t break anything)
   const [activeTab, setActiveTab] = useState("lobby"); // lobby | match | leaderboard | profile
 
-
   const [globalPlayers, setGlobalPlayers] = useState([]);
-  const socket = useMemo(() => io(serverUrl, { autoConnect: true }), []);
+  const socket = useMemo(
+    () =>
+      io(serverUrl, {
+        autoConnect: true,
+        transports: ["websocket", "polling"],
+      }),
+    []
+  );
 
   useEffect(() => {
+    socket.on("connect", () => {
+      setSocketConnected(true);
+      setSocketError("");
+    });
+    socket.on("disconnect", () => {
+      setSocketConnected(false);
+    });
+    socket.on("connect_error", (error) => {
+      setSocketConnected(false);
+      setSocketError(error?.message || "Unable to reach the Prompt Heist server.");
+    });
     socket.on("room:state", (s) => setRoomState(s));
-    return () => socket.off("room:state");
+    socket.on("room:joined", (s) => {
+      if (s?.roomId) setRoomId(s.roomId);
+      setJoined(true);
+      setSocketError("");
+    });
+    socket.on("app:error", (e) => setSocketError(e?.message || "Server error"));
+    return () => {
+      socket.off("connect");
+      socket.off("disconnect");
+      socket.off("connect_error");
+      socket.off("room:state");
+      socket.off("room:joined");
+      socket.off("app:error");
+    };
   }, [socket]);
 
 
@@ -51,18 +87,28 @@ export default function App() {
     try {
       const res = await fetch(`${serverUrl}/api/leaderboard/global?limit=10`);
       const json = await res.json();
-      if (json?.ok) setGlobalPlayers(json.players || []);
-    } catch (e) {
-      // silent fail for MVP
+      return json?.ok ? json.players || [] : null;
+    } catch {
+      // Leaderboard refresh should not interrupt an active match.
+      return null;
     }
   }
 
   // Refresh global leaderboard when entering the Leaderboard tab
   useEffect(() => {
     if (activeTab !== "leaderboard") return;
-    fetchGlobalLeaderboard();
-    const t = setInterval(fetchGlobalLeaderboard, 4000);
-    return () => clearInterval(t);
+    let alive = true;
+    const refresh = () => {
+      fetchGlobalLeaderboard().then((players) => {
+        if (alive && players) setGlobalPlayers(players);
+      });
+    };
+    refresh();
+    const t = setInterval(refresh, 4000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
   }, [activeTab]);
 
   async function ensureStudioNetwork() {
@@ -103,7 +149,7 @@ export default function App() {
       return;
     }
 
-        await ensureStudioNetwork();
+    await ensureStudioNetwork();
 
     const client = createWalletClient({
       chain: genlayerStudio,
@@ -131,7 +177,7 @@ export default function App() {
       const timestamp = Math.floor(Date.now() / 1000);
       const message = `Set display name to ${name} at ${timestamp}`;
 
-            await ensureStudioNetwork();
+      await ensureStudioNetwork();
 
       const client = createWalletClient({
         chain: genlayerStudio,
@@ -156,23 +202,40 @@ export default function App() {
     })().catch((e) => alert(e?.message || String(e)));
   }
 
-  function joinRoom() {
+  async function joinRoom() {
     if (!wallet) {
       alert("Connect wallet first.");
       return;
     }
-    socket.emit("room:join", { roomId, wallet });
-    setJoined(true);
+    try {
+      const rid = normalizeRoomId(roomId);
+      const timestamp = Math.floor(Date.now() / 1000);
+      const message = `Join Prompt Heist room ${rid} at ${timestamp}`;
+
+      await ensureStudioNetwork();
+
+      const client = createWalletClient({
+        chain: genlayerStudio,
+        transport: custom(window.ethereum),
+      });
+
+      const signature = await client.signMessage({ account: wallet, message });
+      setRoomId(rid);
+      if (!socket.connected) socket.connect();
+      socket.emit("room:join", { roomId: rid, wallet, timestamp, signature });
+    } catch (e) {
+      setSocketError(e?.message || String(e));
+    }
   }
 
   function leaveRoom() {
-    socket.emit("room:leave", { roomId, wallet });
+    socket.emit("room:leave", { roomId });
     setJoined(false);
     setRoomState(null);
   }
 
   function startMatch() {
-    socket.emit("match:start", { roomId, wallet });
+    socket.emit("match:start", { roomId });
     setActiveTab("match");
   }
 
@@ -180,7 +243,11 @@ export default function App() {
     const match = roomState?.match;
     if (!match) return;
     const round = match.rounds[match.currentRoundIndex];
-    socket.emit("round:submit", { roomId, wallet, roundId: round.roundId, text });
+    socket.emit("round:submit", { roomId, roundId: round.roundId, text });
+  }
+
+  function retryJudge() {
+    socket.emit("round:retry-judge", { roomId });
   }
 
   function createChallenge() {
@@ -189,14 +256,13 @@ export default function App() {
     const round = match.rounds[match.currentRoundIndex];
     socket.emit("challenge:create", {
       roomId,
-      wallet,
       roundId: round.roundId,
       reasonCode: "too_harsh",
     });
   }
 
   function voteChallenge(voteYes) {
-    socket.emit("challenge:vote", { roomId, wallet, voteYes });
+    socket.emit("challenge:vote", { roomId, voteYes });
   }
 
   const match = roomState?.match || null;
@@ -334,6 +400,11 @@ export default function App() {
                     <div className="mt-2 text-xs text-white/60">
                       Create a room ID and share it. Anyone can join.
                     </div>
+                    {socketError ? (
+                      <div className="mt-2 text-xs text-rose-300">
+                        {socketError}
+                      </div>
+                    ) : null}
                   </MenuRow>
 
                   <MenuRow label="CREW">
@@ -376,6 +447,8 @@ export default function App() {
                   onSubmit={submitGuess}
                   onChallenge={createChallenge}
                   onVote={voteChallenge}
+                  onRetryJudge={retryJudge}
+                  canRetry={!!isHost}
                 />
               )}
 
@@ -430,6 +503,10 @@ export default function App() {
                     <div className="flex items-center justify-between gap-3">
                       <Badge label={joined ? "In room" : "Not in room"} tone={joined ? "good" : "muted"} />
                       <Badge label={wallet ? shortAddr(wallet) : "No wallet"} />
+                    </div>
+                    <div className="mt-2 flex items-center justify-between gap-3 text-xs text-white/60">
+                      <span>{socketConnected ? "Server connected" : "Server offline"}</span>
+                      <span className="font-mono">{serverUrl}</span>
                     </div>
                   </MenuRow>
 
@@ -505,7 +582,7 @@ export default function App() {
                       </Button>
                     )}
                     <div className="mt-2 text-xs text-white/60">
-                      Names are verified by signature (server cache in MVP).
+                      Names are verified by signature and stored on the leaderboard.
                     </div>
                   </MenuRow>
                 </div>
@@ -582,7 +659,7 @@ function MenuRow({ label, children }) {
 
 /* ---------- Your existing components (kept) ---------- */
 
-function GameCard({ roomState, match, currentRound, onSubmit, onChallenge, onVote }) {
+function GameCard({ roomState, match, currentRound, onSubmit, onChallenge, onVote, onRetryJudge, canRetry }) {
   if (!match || !currentRound) {
     return (
       <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
@@ -640,6 +717,13 @@ function GameCard({ roomState, match, currentRound, onSubmit, onChallenge, onVot
         {phase === "reveal" && <HintPanel title="Observe" text="Study the evidence. Your theory phase begins shortly." />}
         {phase === "submit" && <SubmitPanel key={roundId} onSubmit={onSubmit} />}
         {phase === "verdict" && <Leaderboard match={match} roundId={roundId} members={roomState?.members || []} />}
+        {phase === "judge_error" && (
+          <HintPanel
+            title="GenLayer Retry Needed"
+            text={match.judgeError?.message || "GenLayer did not return a consensus verdict. The host can retry."}
+            action={<Button onClick={onRetryJudge} variant={canRetry ? "primary" : "disabled"} disabled={!canRetry}>Retry Judge</Button>}
+          />
+        )}
         {phase === "challenge_window" && (
           <>
             <HintPanel
@@ -666,6 +750,20 @@ function GameCard({ roomState, match, currentRound, onSubmit, onChallenge, onVot
             <Votes match={match} />
           </>
         )}
+        {phase === "challenge_review" && (
+          <>
+            <HintPanel title="GenLayer Review" text="The challenged ruling is being reviewed by the GenLayer judge." />
+            <Leaderboard match={match} roundId={roundId} members={roomState?.members || []} />
+            <Votes match={match} />
+          </>
+        )}
+        {phase === "challenge_result" && (
+          <>
+            <HintPanel title="Challenge Result" text="The reviewed ruling is ready. Moving to the next case shortly." />
+            <Leaderboard match={match} roundId={roundId} members={roomState?.members || []} />
+            <Votes match={match} />
+          </>
+        )}
         {phase === "completed" && (
           <>
             <HintPanel title="Case Closed" text="Match completed. Final XP is below." />
@@ -681,14 +779,6 @@ function SubmitPanel({ onSubmit }) {
   const [text, setText] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const max = 240;
-
-  function doSubmit() {
-    if (submitted) return;
-    const t = (text || "").trim();
-    if (!t) return;
-    setSubmitted(true);
-    onSubmit(t);
-  }
 
   return (
     <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
@@ -731,9 +821,9 @@ function Leaderboard({ match, roundId, members = [] }) {
   const lb = match.leaderboard?.[roundId] || [];
   const phase = match.phase;
 
-  // During verdict/challenge, judge may still be deliberating
+  // During verdict/review, judge may still be deliberating
   const showPending =
-    (phase === "verdict" || phase === "challenge_window") && lb.length === 0;
+    (phase === "verdict" || phase === "challenge_review" || phase === "challenge_window") && lb.length === 0;
 
   // After match completion, hide Round leaderboard (Final + Global should remain)
   if (phase === "completed") return null;
@@ -903,13 +993,13 @@ function GlobalLeaderboard({ players }) {
 
 function ProfileModal({ value, onChange, onClose, onSave, canSave }) {
   return (
-    <motion.div
+    <Motion.div
       className="fixed inset-0 z-[250] flex items-center justify-center bg-black/70 px-4"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
     >
-      <motion.div
+      <Motion.div
         className="w-full max-w-md rounded-3xl border border-white/10 bg-black/60 p-4 shadow-noir backdrop-blur"
         initial={{ scale: 0.98, opacity: 0, y: 8 }}
         animate={{ scale: 1, opacity: 1, y: 0 }}
@@ -942,8 +1032,8 @@ function ProfileModal({ value, onChange, onClose, onSave, canSave }) {
             Save
           </Button>
         </div>
-      </motion.div>
-    </motion.div>
+      </Motion.div>
+    </Motion.div>
   );
 }
 
@@ -1019,7 +1109,7 @@ function ScoreBar({ score }) {
   return (
     <div className="w-24 shrink-0">
       <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
-        <motion.div
+        <Motion.div
           className="h-full bg-white/70"
           initial={{ width: 0 }}
           animate={{ width: `${pct}%` }}
@@ -1038,6 +1128,9 @@ function phaseLabel(p) {
     verdict: "Verdict",
     challenge_window: "Appeal",
     challenge_vote: "Vote",
+    challenge_review: "Review",
+    challenge_result: "Result",
+    judge_error: "Retry",
     completed: "Completed",
   };
   return map[p] || p;
@@ -1045,6 +1138,7 @@ function phaseLabel(p) {
 
 function phaseTone(p) {
   if (p === "submit") return "good";
-  if (p === "challenge_vote") return "warn";
+  if (p === "challenge_vote" || p === "judge_error") return "warn";
+  if (p === "challenge_result") return "good";
   return "muted";
 }

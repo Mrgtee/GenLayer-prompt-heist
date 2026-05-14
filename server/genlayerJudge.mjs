@@ -1,18 +1,15 @@
 import { createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 
-// Reads from .env (loaded by index.js when running the server)
-// For ad-hoc tests, use: node -e "import('dotenv/config'); ..."
 const RPC = process.env.GENLAYER_RPC || "https://studio.genlayer.com/api";
-const ADDR =
-  process.env.GENLAYER_JUDGE_ADDRESS ||
-  "0xEFE91eCB598ada8f7fc08E6735606073BBb4D59a";
-
-// read-only calls still need an "account" field in the SDK client.
-// This is NOT a private key. Any valid address string is fine for reads.
+const ADDR = process.env.GENLAYER_JUDGE_ADDRESS;
 const CALLER =
   process.env.GENLAYER_CALLER ||
   "0x0000000000000000000000000000000000000000";
+
+if (!ADDR) {
+  console.warn("GENLAYER_JUDGE_ADDRESS is not set; judging calls will fail until configured.");
+}
 
 const client = createClient({
   chain: studionet,
@@ -20,61 +17,130 @@ const client = createClient({
   account: CALLER,
 });
 
-// Some setups want this initialized before interactions.
-// Safe to call once; if not needed, it still won’t break anything.
-let initPromise = null;
-async function ensureInit() {
-  if (!initPromise) initPromise = client.initializeConsensusSmartContract();
-  return initPromise;
-}
+function parseMaybeJson(value) {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text) return value;
 
-export async function judgeGuess({ guess, secret }) {
-  await ensureInit();
+  const candidates = [text];
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end >= start) candidates.push(text.slice(start, end + 1));
 
-  let res;
-try {
-  res = await client.readContract({
-    address: ADDR,
-    functionName: "score_guess",
-    args: [String(guess ?? ""), String(secret ?? "")],
-  });
-} catch (e) {
-  console.error("readContract failed:", e?.message || String(e));
-  // viem/genlayer-js sometimes nests useful detail:
-  console.error("readContract detail:", e?.cause?.message || e?.details || "");
-  throw e;
-}
-
-  // Helper to read from Map or object/tuple shapes
-  const get = (k, i) => {
-    if (res instanceof Map) {
-      if (res.has(k)) return res.get(k);
-      // some SDKs might use numeric keys as strings
-      if (res.has(String(i))) return res.get(String(i));
-      return undefined;
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // try the next shape
     }
-    return res?.[k] ?? res?.[i] ?? res?.result?.[k] ?? res?.result?.[i];
-  };
+  }
+  return value;
+}
 
-  const rawScore = get("score", 0) ?? 0;
-  const rawReasoning = get("reasoning", 1) ?? "";
-  const rawXpDelta = get("xpDelta", 2) ?? rawScore ?? 0;
+function readField(res, key, index) {
+  const parsed = parseMaybeJson(res);
 
-  const scoreNum = typeof rawScore === "bigint" ? Number(rawScore) : Number(rawScore);
-  const xpNum = typeof rawXpDelta === "bigint" ? Number(rawXpDelta) : Number(rawXpDelta);
-  const reasoning = String(rawReasoning ?? "").trim();
+  if (parsed instanceof Map) {
+    if (parsed.has(key)) return parseMaybeJson(parsed.get(key));
+    if (parsed.has(String(index))) return parseMaybeJson(parsed.get(String(index)));
+    if (parsed.has(index)) return parseMaybeJson(parsed.get(index));
+    return undefined;
+  }
 
-  const guessStr = String(guess ?? "").trim();
-  const secretStr = String(secret ?? "").trim();
+  if (Array.isArray(parsed)) return parseMaybeJson(parsed[index]);
+  if (parsed && typeof parsed === "object") {
+    return parseMaybeJson(
+      parsed[key] ??
+      parsed[index] ??
+      parsed.result?.[key] ??
+      parsed.result?.[index]
+    );
+  }
 
-  // If we have inputs but the judge response is empty/unusable, force fallback
-  if (guessStr && secretStr && (!Number.isFinite(scoreNum) || (scoreNum === 0 && !reasoning))) {
-    throw new Error("GenLayer judge returned empty result (0 score, no reasoning)");
+  return undefined;
+}
+
+function numberField(res, key, index, fallback = 0) {
+  const raw = readField(res, key, index);
+  const value = typeof raw === "bigint" ? Number(raw) : Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function stringField(res, key, index, fallback = "") {
+  const raw = readField(res, key, index);
+  return String(raw ?? fallback).trim();
+}
+
+function normalizeScoreResult(res) {
+  const score = numberField(res, "score", 0, 0);
+  const reasoning = stringField(res, "reasoning", 1, "");
+  const xpDelta = numberField(res, "xpDelta", 2, score);
+
+  if (!Number.isFinite(score) || !reasoning) {
+    throw new Error("GenLayer judge returned an invalid score result");
   }
 
   return {
-    score: Number.isFinite(scoreNum) ? scoreNum : 0,
+    score: Math.max(0, Math.min(100, Math.round(score))),
     reasoning,
-    xpDelta: Number.isFinite(xpNum) ? xpNum : 0,
+    xpDelta: Math.max(0, Math.round(xpDelta)),
   };
+}
+
+function normalizeReviewResult(res, originalScore = 0) {
+  const action = stringField(res, "action", 2, "uphold").toLowerCase();
+  const score = numberField(res, "score", 0, originalScore);
+  const reasoning = stringField(res, "reasoning", 1, "");
+
+  if (!reasoning) {
+    throw new Error("GenLayer judge returned an invalid review result");
+  }
+
+  return {
+    score: Math.max(0, Math.min(100, Math.round(score))),
+    reasoning,
+    action: action === "adjust" ? "adjust" : "uphold",
+  };
+}
+
+async function callJudge(functionName, args) {
+  if (!ADDR) throw new Error("GENLAYER_JUDGE_ADDRESS is required");
+
+  try {
+    return await client.simulateWriteContract({
+      address: ADDR,
+      functionName,
+      args,
+      transactionHashVariant: "latest-nonfinal",
+    });
+  } catch (e) {
+    console.error(`${functionName} failed:`, e?.message || String(e));
+    console.error(`${functionName} detail:`, e?.cause?.message || e?.details || "");
+    throw e;
+  }
+}
+
+export async function judgeGuess({ guess, secret }) {
+  const res = await callJudge("score_guess", [
+    String(guess ?? ""),
+    String(secret ?? ""),
+  ]);
+  return normalizeScoreResult(res);
+}
+
+export async function reviewVerdict({
+  guess,
+  secret,
+  originalScore,
+  originalReasoning,
+  challengeReason,
+}) {
+  const res = await callJudge("review_verdict", [
+    String(guess ?? ""),
+    String(secret ?? ""),
+    Math.max(0, Math.min(100, Math.round(Number(originalScore) || 0))),
+    String(originalReasoning ?? ""),
+    String(challengeReason ?? ""),
+  ]);
+  return normalizeReviewResult(res, originalScore);
 }

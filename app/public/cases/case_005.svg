@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" role="img" aria-label="Paper cutout clockwork dragon above a snowy temple">
+  <defs>
+    <linearGradient id="winter" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#c8e4ef"/>
+      <stop offset=".62" stop-color="#eef5f8"/>
+      <stop offset="1" stop-color="#9db2c4"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="700" fill="url(#winter)"/>
+  <path d="M0 540 160 380l112 78 132-122 144 102 146-158 156 164 128-80 222 182v154H0z" fill="#b8c9d7"/>
+  <path d="M370 500h460v135H370z" fill="#6d4655"/>
+  <path d="M330 500h540l-270-150z" fill="#9b314b"/>
+  <path d="M416 444h368l-184-100z" fill="#c94e63"/>
+  <rect x="450" y="530" width="84" height="105" fill="#e7d6bd"/>
+  <rect x="666" y="530" width="84" height="105" fill="#e7d6bd"/>
+  <g transform="translate(300 125)">
+    <path d="M70 230c80-150 220-190 422-120 58 20 102 4 150-54-4 120-82 190-220 176-92-9-164 16-220 74z" fill="#c96b33" stroke="#8d3d22" stroke-width="8"/>
+    <path d="M500 102l70-72 12 92zM172 160 94 78l114 18z" fill="#d64f32"/>
+    <circle cx="472" cy="126" r="44" fill="#d6a348"/>
+    <circle cx="472" cy="126" r="20" fill="#7c4926"/>
+    <circle cx="555" cy="96" r="9" fill="#1d160f"/>
+    <path d="M118 245c-54 18-88 54-102 108 58-14 104-40 138-82z" fill="#d78c42"/>
+    <g fill="none" stroke="#6b3e1f" stroke-width="7">
+      <circle cx="332" cy="172" r="34"/><path d="M332 138v68M298 172h68"/>
+      <circle cx="242" cy="200" r="24"/><path d="M226 184l32 32M258 184l-32 32"/>
+    </g>
+  </g>
+  <g fill="#fff" opacity=".9">
+    <circle cx="120" cy="116" r="5"/><circle cx="248" cy="72" r="4"/><circle cx="988" cy="120" r="5"/><circle cx="1054" cy="220" r="4"/>
+  </g>
+</svg>

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" role="img" aria-label="Neon koi detective in a rainy cyberpunk alley">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101124"/>
+      <stop offset="0.55" stop-color="#29164a"/>
+      <stop offset="1" stop-color="#0a0c18"/>
+    </linearGradient>
+    <linearGradient id="pavement" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d2337"/>
+      <stop offset="1" stop-color="#070910"/>
+    </linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="1200" height="700" fill="url(#sky)"/>
+  <path d="M0 484h1200v216H0z" fill="url(#pavement)"/>
+  <path d="M132 95h190v385H98zM888 80h198v410h-160z" fill="#11182a"/>
+  <path d="M356 140h128v337h-82zM705 122h124v354h-86z" fill="#151d31"/>
+  <g filter="url(#glow)">
+    <rect x="146" y="145" width="116" height="26" rx="4" fill="#ff4fd8"/>
+    <rect x="930" y="156" width="96" height="28" rx="4" fill="#27e8ff"/>
+    <rect x="734" y="192" width="56" height="190" rx="8" fill="#e6d44c" opacity=".8"/>
+  </g>
+  <g stroke="#8cecff" stroke-width="4" opacity=".55">
+    <path d="M122 560c180-42 320-40 460-8s312 39 500-28"/>
+    <path d="M206 628c142-28 323-23 474-2s274 14 392-20"/>
+  </g>
+  <g transform="translate(515 240)">
+    <ellipse cx="90" cy="145" rx="130" ry="88" fill="#f2673a"/>
+    <path d="M-20 148c-56-34-78-72-70-114 47 16 83 47 111 94z" fill="#f5b44d"/>
+    <path d="M190 115c52-22 85-57 100-105 26 56 11 111-55 156z" fill="#ff8d4f"/>
+    <circle cx="132" cy="116" r="13" fill="#071018"/>
+    <path d="M54 157c41 28 93 35 151 16" fill="none" stroke="#fff4d1" stroke-width="9" stroke-linecap="round"/>
+    <path d="M12 80h220l-42-55H54z" fill="#171b22"/>
+    <path d="M68 25h112l-34-42H98z" fill="#222936"/>
+    <path d="M23 266c58-54 142-64 233-24" fill="none" stroke="#f6c266" stroke-width="24" stroke-linecap="round"/>
+  </g>
+  <g stroke="#b6d7ff" stroke-width="3" opacity=".5">
+    <path d="M72 0v700M168 0v700M270 0v700M972 0v700M1072 0v700"/>
+  </g>
+</svg>

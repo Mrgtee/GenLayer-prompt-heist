@@ -1,5 +1,5 @@
 {
-  "name": "app",
+  "name": "prompt-heist-app",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:room": "node scripts/testRoomFlow.mjs"
   },
   "dependencies": {
     "framer-motion": "^12.27.5",
