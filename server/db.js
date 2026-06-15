@@ -149,7 +149,7 @@ async function addXpSupabase({ wallet, deltaXp, displayName, roomId = null }) {
 async function topPlayersSupabase(limit = 25) {
   const safeLimit = Math.min(100, Math.max(1, Number(limit || 25)));
   const rows = await supabaseRequest(
-    `leaderboard?select=wallet,display_name,xp,updated_at&order=xp.desc&order=updated_at.desc&limit=${safeLimit}`,
+    `leaderboard?select=wallet,display_name,xp,updated_at&order=xp.desc,updated_at.desc&limit=${safeLimit}`,
   );
 
   return (Array.isArray(rows) ? rows : []).map((row) => ({
