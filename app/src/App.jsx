@@ -289,11 +289,27 @@ export default function App() {
       return;
     }
 
+    const optimisticRoom = {
+      roomId: rid,
+      host: wallet,
+      members: [{
+        wallet,
+        displayName: clampName(currentName, `player_${wallet.slice(2, 6)}`),
+      }],
+      match: null,
+    };
+
     try {
-      await signAndJoinRoom(rid);
-      setActiveTab("lobby");
       setSocketError("");
+      setRoomId(rid);
+      setJoinCode(rid);
+      setJoined(true);
+      setRoomState(optimisticRoom);
+      setActiveTab("lobby");
+      await signAndJoinRoom(rid);
     } catch (error) {
+      setJoined(false);
+      setRoomState(null);
       setSocketError(error?.message || String(error));
     }
   }
