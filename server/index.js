@@ -98,10 +98,10 @@ function requireWallet(socket) {
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-app.get("/api/leaderboard/global", (req, res) => {
+app.get("/api/leaderboard/global", async (req, res) => {
   try {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 25)));
-    const rows = topPlayers(limit);
+    const rows = await topPlayers(limit);
     return res.json({
       ok: true,
       players: rows.map((p) => ({
@@ -133,7 +133,7 @@ app.post("/api/profile/display-name", async (req, res) => {
     }
 
     users.set(wallet.toLowerCase(), { displayName, updatedAt: Date.now() });
-    upsertPlayer({ wallet, displayName });
+    await upsertPlayer({ wallet, displayName });
     engine.updateDisplayName({ wallet, displayName });
 
     return res.json({ ok: true });
