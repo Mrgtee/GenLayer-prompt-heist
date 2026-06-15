@@ -6,7 +6,7 @@ import http from "http";
 import { Server } from "socket.io";
 import { z } from "zod";
 import { recoverMessageAddress } from "viem";
-import { topPlayers, upsertPlayer } from "./db.js";
+import { getPlayer, topPlayers, upsertPlayer } from "./db.js";
 import { MatchEngine } from "./matchEngine.js";
 
 dotenv.config({ path: new URL("./.env", import.meta.url) });
@@ -113,6 +113,30 @@ app.get("/api/leaderboard/global", async (req, res) => {
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.get("/api/profile/:wallet", async (req, res) => {
+  const parsed = WalletSchema.safeParse(req.params.wallet || "");
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: "Invalid wallet" });
+  }
+
+  try {
+    const player = await getPlayer(parsed.data);
+    return res.json({
+      ok: true,
+      player: player
+        ? {
+            wallet: player.wallet,
+            displayName: player.displayName,
+            xp: player.totalXp,
+            updatedAt: (player.updatedAt || 0) * 1000,
+          }
+        : null,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
 
