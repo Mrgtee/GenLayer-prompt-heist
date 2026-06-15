@@ -1,11 +1,29 @@
+@import url("https://fonts.googleapis.com/css2?family=Bungee&family=Space+Grotesk:wght@400;500;700&display=swap");
 @import "tailwindcss";
 
 :root {
   color-scheme: dark;
+  font-family: "Space Grotesk", sans-serif;
 }
 
 body {
   margin: 0;
   background: #060708;
+  font-family: "Space Grotesk", sans-serif;
 }
 
+#root {
+  min-height: 100vh;
+}
+
+.game-title {
+  font-family: "Bungee", "Arial Black", sans-serif;
+  letter-spacing: 0.04em;
+  line-height: 0.95;
+  text-transform: uppercase;
+  background: linear-gradient(180deg, #fff3bf 0%, #ffcf70 46%, #ff8f39 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 0 24px rgba(255, 196, 88, 0.28), 0 10px 30px rgba(0, 0, 0, 0.35);
+}
