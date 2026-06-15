@@ -56,6 +56,18 @@ function xpValue(value) {
   return Math.max(0, Math.floor(Number(value || 0)));
 }
 
+function formatPlayerRow(row) {
+  if (!row) return null;
+  return {
+    wallet: row.wallet,
+    displayName: row.display_name ?? row.displayName ?? null,
+    totalXp: Number(row.xp ?? row.totalXp ?? 0),
+    updatedAt: row.updated_at
+      ? Math.floor(Date.parse(row.updated_at) / 1000)
+      : Number(row.updatedAt || 0),
+  };
+}
+
 async function supabaseRequest(pathname, { method = "GET", body, prefer } = {}) {
   if (!HAS_SUPABASE_CONFIG) throw new Error("Supabase is not configured");
 
@@ -146,18 +158,24 @@ async function addXpSupabase({ wallet, deltaXp, displayName, roomId = null }) {
   }
 }
 
+async function getPlayerSupabase(wallet) {
+  const w = normalizeWallet(wallet);
+  if (!w) return null;
+
+  const rows = await supabaseRequest(
+    `leaderboard?wallet=eq.${encodeURIComponent(w)}&select=wallet,display_name,xp,updated_at&limit=1`,
+  );
+
+  return formatPlayerRow(Array.isArray(rows) ? rows[0] : null);
+}
+
 async function topPlayersSupabase(limit = 25) {
   const safeLimit = Math.min(100, Math.max(1, Number(limit || 25)));
   const rows = await supabaseRequest(
     `leaderboard?select=wallet,display_name,xp,updated_at&order=xp.desc,updated_at.desc&limit=${safeLimit}`,
   );
 
-  return (Array.isArray(rows) ? rows : []).map((row) => ({
-    wallet: row.wallet,
-    displayName: row.display_name,
-    totalXp: Number(row.xp || 0),
-    updatedAt: row.updated_at ? Math.floor(Date.parse(row.updated_at) / 1000) : 0,
-  }));
+  return (Array.isArray(rows) ? rows : []).map(formatPlayerRow);
 }
 
 export function upsertPlayer({ wallet, displayName }) {
@@ -196,6 +214,22 @@ export function addXp({ wallet, deltaXp, displayName, roomId }) {
   `).run(w, displayName || null, xpValue(deltaXp), now);
 }
 
+export async function getPlayer(wallet) {
+  if (USE_SUPABASE) return getPlayerSupabase(wallet);
+
+  const w = normalizeWallet(wallet);
+  if (!w) return null;
+
+  const row = sqliteDb.prepare(`
+    SELECT wallet, displayName, totalXp, updatedAt
+    FROM players
+    WHERE wallet = ?
+    LIMIT 1
+  `).get(w);
+
+  return formatPlayerRow(row);
+}
+
 export async function topPlayers(limit = 25) {
   if (USE_SUPABASE) return topPlayersSupabase(limit);
 
@@ -204,5 +238,5 @@ export async function topPlayers(limit = 25) {
     FROM players
     ORDER BY totalXp DESC, updatedAt DESC
     LIMIT ?
-  `).all(limit);
+  `).all(limit).map(formatPlayerRow);
 }
