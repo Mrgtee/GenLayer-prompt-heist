@@ -47,6 +47,7 @@ export default function App() {
   const [roomState, setRoomState] = useState(null);
   const [socketConnected, setSocketConnected] = useState(false);
   const [socketError, setSocketError] = useState("");
+  const [copiedCode, setCopiedCode] = useState(false);
 
   const [activeTab, setActiveTab] = useState("lobby");
   const [globalPlayers, setGlobalPlayers] = useState([]);
@@ -79,6 +80,7 @@ export default function App() {
         setRoomId(state.roomId);
         setJoinCode(state.roomId);
       }
+      setCopiedCode(false);
       setJoined(true);
       setSocketError("");
     });
@@ -301,6 +303,7 @@ export default function App() {
 
     try {
       setSocketError("");
+      setCopiedCode(false);
       setRoomId(rid);
       setJoinCode(rid);
       setJoined(true);
@@ -328,14 +331,26 @@ export default function App() {
 
     try {
       await signAndJoinRoom(rid);
+      setCopiedCode(false);
       setSocketError("");
     } catch (error) {
       setSocketError(error?.message || String(error));
     }
   }
 
+  async function copyRoomCode() {
+    try {
+      await navigator.clipboard?.writeText(roomId);
+      setCopiedCode(true);
+      window.setTimeout(() => setCopiedCode(false), 1600);
+    } catch {
+      setCopiedCode(false);
+    }
+  }
+
   function leaveRoom() {
     socket.emit("room:leave", { roomId });
+    setCopiedCode(false);
     setJoined(false);
     setRoomState(null);
     setActiveTab("lobby");
@@ -459,7 +474,7 @@ export default function App() {
                     key={tab.id}
                     onClick={() => setActiveTab(tab.id)}
                     className={[
-                      "flex-1 border-r border-white/10 px-4 py-3 text-sm font-extrabold uppercase tracking-wider transition last:border-r-0",
+                      "flex-1 border-r border-white/10 px-4 py-3 text-sm font-extrabold uppercase tracking-wider transition duration-150 active:scale-[0.98] active:bg-amber-300 active:text-black last:border-r-0",
                       active ? "bg-amber-400/20 text-amber-200" : "text-white/75 hover:bg-white/5",
                     ].join(" ")}
                   >
@@ -524,10 +539,10 @@ export default function App() {
                         </div>
                         <div className="mt-4 flex flex-wrap gap-2">
                           <Button
-                            onClick={() => navigator.clipboard?.writeText(roomId).catch(() => {})}
+                            onClick={copyRoomCode}
                             variant="signal"
                           >
-                            Copy Code
+                            {copiedCode ? "Copied" : "Copy Code"}
                           </Button>
                           <Button onClick={leaveRoom} variant="ghost">
                             Leave Room
@@ -1187,7 +1202,7 @@ function ProfileModal({ value, onChange, onClose, onSave, canSave }) {
             <div className="font-mono text-xs text-white/55">IDENTITY</div>
             <div className="mt-1 text-base font-semibold">Set your display name</div>
           </div>
-          <button onClick={onClose} className="rounded-xl border border-white/10 bg-white/5 px-3 py-1 text-sm hover:bg-white/10">
+          <button onClick={onClose} className="rounded-xl border border-white/10 bg-white/5 px-3 py-1 text-sm transition duration-150 hover:bg-white/10 active:scale-95 active:border-amber-300 active:bg-amber-300 active:text-black">
             X
           </button>
         </div>
@@ -1215,12 +1230,12 @@ function ProfileModal({ value, onChange, onClose, onSave, canSave }) {
 }
 
 function Button({ children, onClick, variant = "primary", disabled, className = "" }) {
-  const base = "inline-flex items-center justify-center rounded-2xl border px-4 py-2 text-sm font-semibold transition";
+  const base = "inline-flex transform-gpu items-center justify-center rounded-2xl border px-4 py-2 text-sm font-semibold transition duration-150 active:scale-95 active:border-amber-300 active:bg-amber-300 active:text-black active:shadow-[0_10px_30px_rgba(255,193,7,0.2)] disabled:cursor-not-allowed disabled:transform-none disabled:active:scale-100 disabled:active:border-white/10 disabled:active:bg-white/5 disabled:active:text-white/35";
   const styles = {
     primary: "border-amber-200/30 bg-amber-300 text-black shadow-[0_10px_30px_rgba(255,193,7,0.12)] hover:bg-amber-200",
     signal: "border-cyan-300/25 bg-cyan-300/12 text-cyan-100 shadow-[0_10px_30px_rgba(34,211,238,0.08)] hover:bg-cyan-300/18",
     ghost: "border-white/15 bg-transparent text-white hover:bg-white/5",
-    disabled: "cursor-not-allowed border-white/10 bg-white/5 text-white/35",
+    disabled: "border-white/10 bg-white/5 text-white/35 shadow-none",
   };
 
   return (
